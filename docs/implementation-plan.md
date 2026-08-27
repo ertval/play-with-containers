@@ -92,6 +92,7 @@ play-with-containers/
 │   └── test_audit.sh              # Bonus: automated end-to-end verification (audit flow)
 ├── docs/
 │   ├── requirements/              # Subject readme.md and audit.md
+│   └── implementation-plan.md     # This plan
 │   ├── implementation-plan.md     # This plan
 │   └── audit_preparation.md       # Comprehensive theoretical study guide & 15-question audit prep
 └── srcs/
@@ -368,8 +369,15 @@ play-with-containers/
 
 - No `version:` field; `name: play-with-containers` optional top-level.
 
+### Step 8: Comprehensive README & Audit Study Guide
 ### Step 8: Documentation & Theoretical Audit Preparation Guide
 
+- Prerequisites (Linux, Docker Engine 24+, Docker Compose v2.20+, `make`, `curl`/`Postman`).
+- Env table with descriptions, `cp .env.example .env` setup.
+- Usage: `docker compose up --build -d`, `docker compose logs -f`, `docker compose down` vs `down -v`.
+- Curl & Postman walkthrough mirroring audit: `POST /api/movies/` 200, `GET /api/movies/` 200+JSON, `POST /api/billing/` 200, stop billing → POST 200 → restart → DB row appears, `docker volume ls`/`docker ps`/`docker inspect` checks, network isolation `curl localhost:5432` refused.
+- Design justifications: Alpine 3.23.5 penultimate patch pin, lowercase `rabbit-queue` OCI compliance, `POST 200` vs 201, `restart: on-failure` audit-forced.
+- Oral study guide: containers vs VMs, Docker engine (client/daemon/containerd/runc/OCI), Dockerfile instructions, volumes (named/bind/anonymous), networks (bridge/host/overlay/macvlan, DNS), microservices vs monolith, queues & RabbitMQ (AMQP, exchanges, durability, acks, prefetch).
 This step produces two distinct, high-value documentation artifacts:
 
 #### 8A. Root `README.md` (Project & Operational Documentation)
