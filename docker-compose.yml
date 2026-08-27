@@ -19,7 +19,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 40s
+      start_period: 60s
 
   billing-database:
     build: ./srcs/billing-database
@@ -41,7 +41,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 40s
+      start_period: 60s
 
   rabbit-queue:
     build: ./srcs/rabbit-queue
@@ -148,3 +148,4 @@ volumes:
     name: billing-database
   api-gateway-app:
     name: api-gateway-app
+

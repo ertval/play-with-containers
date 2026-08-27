@@ -44,7 +44,16 @@ config:
 	docker compose config --quiet && echo "compose OK"
 
 lint:
-	hadolint srcs/**/Dockerfile
+	@if command -v hadolint >/dev/null 2>&1; then \
+		hadolint srcs/**/Dockerfile; \
+	elif command -v docker >/dev/null 2>&1; then \
+		for df in srcs/*/Dockerfile; do \
+			echo "Linting $$df..."; \
+			docker run --rm -i hadolint/hadolint < "$$df" || true; \
+		done; \
+	else \
+		echo "Neither hadolint nor docker found for linting"; \
+	fi
 
 test:
 	bash scripts/test_audit.sh

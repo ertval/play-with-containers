@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 # Base image: Alpine 3.23 (penultimate stable release)
+# base-digest: sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 FROM alpine:3.23
 
 WORKDIR /usr/src/app
@@ -27,3 +28,4 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')" || exit 1
 
 CMD ["python3", "server.py"]
+
