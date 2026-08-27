@@ -1,0 +1,150 @@
+services:
+  inventory-database:
+    build: ./srcs/inventory-database
+    image: inventory-database
+    container_name: inventory-database
+    restart: on-failure
+    environment:
+      DB_USER: ${INVENTORY_DB_USER}
+      DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      DB_NAME: ${INVENTORY_DB_NAME}
+    expose:
+      - 5432
+    volumes:
+      - inventory-database:/var/lib/postgresql/data
+    networks:
+      - pwc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${DB_USER}\" -d \"$${DB_NAME}\" -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  billing-database:
+    build: ./srcs/billing-database
+    image: billing-database
+    container_name: billing-database
+    restart: on-failure
+    environment:
+      DB_USER: ${BILLING_DB_USER}
+      DB_PASSWORD: ${BILLING_DB_PASSWORD}
+      DB_NAME: ${BILLING_DB_NAME}
+    expose:
+      - 5432
+    volumes:
+      - billing-database:/var/lib/postgresql/data
+    networks:
+      - pwc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${DB_USER}\" -d \"$${DB_NAME}\" -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  rabbit-queue:
+    build: ./srcs/rabbit-queue
+    image: rabbit-queue
+    container_name: rabbit-queue
+    restart: on-failure
+    environment:
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+    expose:
+      - 5672
+      - 15672
+    networks:
+      - pwc-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+  inventory-app:
+    build: ./srcs/inventory-app
+    image: inventory-app
+    container_name: inventory-app
+    restart: on-failure
+    environment:
+      APP_PORT: 8080
+      INVENTORY_DB_HOST: ${INVENTORY_DB_HOST}
+      INVENTORY_DB_PORT: ${INVENTORY_DB_PORT}
+      INVENTORY_DB_USER: ${INVENTORY_DB_USER}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      INVENTORY_DB_NAME: ${INVENTORY_DB_NAME}
+    expose:
+      - 8080
+    networks:
+      - pwc-network
+    depends_on:
+      inventory-database:
+        condition: service_healthy
+
+  billing-app:
+    build: ./srcs/billing-app
+    image: billing-app
+    container_name: billing-app
+    restart: on-failure
+    environment:
+      APP_PORT: 8080
+      BILLING_DB_HOST: ${BILLING_DB_HOST}
+      BILLING_DB_PORT: ${BILLING_DB_PORT}
+      BILLING_DB_USER: ${BILLING_DB_USER}
+      BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD}
+      BILLING_DB_NAME: ${BILLING_DB_NAME}
+      RABBITMQ_HOST: ${RABBITMQ_HOST}
+      RABBITMQ_PORT: ${RABBITMQ_PORT}
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
+    expose:
+      - 8080
+    networks:
+      - pwc-network
+    depends_on:
+      billing-database:
+        condition: service_healthy
+      rabbit-queue:
+        condition: service_started
+
+  api-gateway-app:
+    build: ./srcs/api-gateway-app
+    image: api-gateway-app
+    container_name: api-gateway-app
+    restart: on-failure
+    ports:
+      - "3000:3000"
+    environment:
+      APP_PORT: 3000
+      INVENTORY_APP_HOST: ${INVENTORY_APP_HOST}
+      INVENTORY_APP_PORT: ${INVENTORY_APP_PORT}
+      RABBITMQ_HOST: ${RABBITMQ_HOST}
+      RABBITMQ_PORT: ${RABBITMQ_PORT}
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
+    volumes:
+      - api-gateway-app:/usr/src/logs
+    networks:
+      - pwc-network
+    depends_on:
+      inventory-app:
+        condition: service_started
+      rabbit-queue:
+        condition: service_started
+
+networks:
+  pwc-network:
+    name: play-with-containers-network
+    driver: bridge
+
+volumes:
+  inventory-database:
+    name: inventory-database
+  billing-database:
+    name: billing-database
+  api-gateway-app:
+    name: api-gateway-app

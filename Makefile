@@ -10,6 +10,7 @@ help:
 	@echo "  make lint      - lint Dockerfiles (hadolint)"
 	@echo "  make test      - run audit E2E suite"
 	@echo "  make restart   - restart all containers"
+	@echo "  make rebuild   - clean rebuild from scratch and start"
 	@echo "  make down      - stop and remove containers + network (keeps volumes)"
 	@echo "  make clean     - down AND remove volumes (all data lost)"
 
@@ -27,6 +28,11 @@ ps:
 
 restart:
 	docker compose restart
+
+rebuild:
+	docker compose down -v --remove-orphans
+	docker compose build --no-cache
+	docker compose up -d
 
 down:
 	docker compose down

@@ -1,17 +1,27 @@
-# secrets
+# Secrets and environment
 .env
 
-# python artifacts
+# Python artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
 venv/
+.venv/
+ENV/
+*.egg-info/
+.eggs/
 
-# logs
+# Logs and persistent output
 logs/
+*.log
 
-# editors / OS / tooling
-.commandcode/
+# Editor and testing caches
 .idea/
 .vscode/
+*.swp
+*.swo
 .DS_Store
-
+.pytest_cache/
