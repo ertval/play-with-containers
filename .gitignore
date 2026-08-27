@@ -9,6 +9,7 @@ venv/
 # logs
 logs/
 
+# editors / OS
 # editors / OS / tooling
 .commandcode/
 .idea/
