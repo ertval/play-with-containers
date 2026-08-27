@@ -92,7 +92,8 @@ play-with-containers/
 │   └── test_audit.sh              # Bonus: automated end-to-end verification (audit flow)
 ├── docs/
 │   ├── requirements/              # Subject readme.md and audit.md
-│   └── implementation-plan.md     # This plan
+│   ├── implementation-plan.md     # This plan
+│   └── audit_preparation.md       # Comprehensive theoretical study guide & 15-question audit prep
 └── srcs/
     ├── api-gateway-app/
     │   ├── Dockerfile             # FROM alpine:3.23.5 (multi-layer cached, non-root, curl/wget for healthcheck)
@@ -367,14 +368,48 @@ play-with-containers/
 
 - No `version:` field; `name: play-with-containers` optional top-level.
 
-### Step 8: Comprehensive README & Audit Study Guide
+### Step 8: Documentation & Theoretical Audit Preparation Guide
 
-- Prerequisites (Linux, Docker Engine 24+, Docker Compose v2.20+, `make`, `curl`/`Postman`).
-- Env table with descriptions, `cp .env.example .env` setup.
-- Usage: `docker compose up --build -d`, `docker compose logs -f`, `docker compose down` vs `down -v`.
-- Curl & Postman walkthrough mirroring audit: `POST /api/movies/` 200, `GET /api/movies/` 200+JSON, `POST /api/billing/` 200, stop billing → POST 200 → restart → DB row appears, `docker volume ls`/`docker ps`/`docker inspect` checks, network isolation `curl localhost:5432` refused.
-- Design justifications: Alpine 3.23.5 penultimate patch pin, lowercase `rabbit-queue` OCI compliance, `POST 200` vs 201, `restart: on-failure` audit-forced.
-- Oral study guide: containers vs VMs, Docker engine (client/daemon/containerd/runc/OCI), Dockerfile instructions, volumes (named/bind/anonymous), networks (bridge/host/overlay/macvlan, DNS), microservices vs monolith, queues & RabbitMQ (AMQP, exchanges, durability, acks, prefetch).
+This step produces two distinct, high-value documentation artifacts:
+
+#### 8A. Root `README.md` (Project & Operational Documentation)
+- **Title & Overview**: Architecture summary, microservices map, and design philosophy.
+- **Prerequisites**: Linux environment, Docker Engine 24+, Docker Compose v2.20+, `make`, `curl`/`Postman`.
+- **Configuration Reference**: Complete markdown table of all environment variables (`.env`), default dummy values, types, and descriptions.
+- **Installation & Lifecycle**:
+  - Quickstart: `cp .env.example .env && make up`
+  - Management commands: `make build`, `make logs`, `make ps`, `make restart`, `make down`, `make clean`.
+- **API Reference & Manual Audit Walkthrough**:
+  - `POST /api/movies/` (JSON payload, HTTP 200 response specification).
+  - `GET /api/movies/` (retrieval with query parameters `?title=` and trailing-slash handling).
+  - `POST /api/billing/` (asynchronous queue dispatch, HTTP 200 response).
+  - Resilience Demo: exact commands for stopping `billing-app`, dispatching billing requests while buffered in RabbitMQ, restarting `billing-app`, and verifying database persistence.
+- **Architectural Justifications**:
+  - Penultimate stable Alpine base image selection (`alpine:3.23.5`).
+  - Strict lowercase naming compliance for OCI container images (`rabbit-queue`).
+  - HTTP 200 return code alignment for POST endpoints.
+  - Restart policy `{on-failure 0}` and single-gateway port exposure (`3000:3000`).
+- **Links**: Direct link to the comprehensive theoretical study guide in `docs/audit_preparation.md`.
+
+#### 8B. `docs/audit_preparation.md` (Complete Theoretical Study Guide & Audit Q&A Manual)
+A standalone, exhaustive educational guide tailored for the student to master every container concept and ace the oral audit defense:
+- **Part 1: In-Depth Theoretical Foundations**:
+  1. *Containers vs. Virtual Machines*: OS kernel sharing, Linux isolation primitives (Namespaces: `pid`, `net`, `ipc`, `mnt`, `uts`, `user`; Control Groups: `cgroups v2` for CPU, memory, I/O limits), hypervisors (Type 1 vs Type 2), overhead, density, startup speed comparison.
+  2. *Docker Engine & Architecture*: Client-Server model, `dockerd`, `containerd`, `runc`, OCI runtime and image specifications.
+  3. *Dockerfile Deep-Dive & Layer Mechanics*: Union file systems (`overlay2`), layer caching, instruction anatomy (`FROM`, `RUN`, `COPY`, `WORKDIR`, `USER`, `EXPOSE`, `ENV`, `ENTRYPOINT` vs `CMD` exec vs shell forms).
+  4. *Docker Volumes & Data Persistence*: Anonymous vs. Named vs. Bind Mounts, container write layers vs persistent storage, lifecycle across container removal.
+  5. *Docker Networking & Service Discovery*: User-defined bridge networks, container embedded DNS (`127.0.0.11`), network namespaces, port publishing (`-p host:container`) vs internal exposure (`EXPOSE`).
+  6. *Microservices Architecture*: Principles (Single Responsibility, loose coupling, high cohesion, domain-driven boundaries), benefits (fault isolation, independent scalability, polyglot technology), tradeoffs vs monoliths (network latency, distributed state, orchestration complexity).
+  7. *Message Queuing & RabbitMQ*: Asynchronous decoupling vs synchronous HTTP blocking, AMQP 0-9-1 protocol mechanics, Producer/Exchange/Binding/Queue/Consumer lifecycle, Exchange routing types (`direct`, `fanout`, `topic`, `headers`), Message durability (`delivery_mode=2`), consumer acknowledgments (`basic_ack` vs `basic_nack`), prefetch count (`basic_qos`).
+- **Part 2: Question-by-Question Model Answers for Audit (15 Questions)**:
+  - Verbatim text of every question from `docs/requirements/audit.md`.
+  - Structured 3-tier response format for each question:
+    1. **Direct Oral Answer**: Concise, professional explanation to speak aloud to the auditor.
+    2. **Deep Technical Breakdown**: The underlying mechanism explaining *why* it works that way.
+    3. **Project Context**: Exact references to where and how this concept is implemented in `play-with-containers`.
+- **Part 3: Interactive Audit Simulation & Terminal Commands**:
+  - Step-by-step reproduction of every terminal command the auditor executes (`docker-compose up`, `docker ps`, `docker inspect -f "{{ .HostConfig.RestartPolicy }}"`, `docker volume ls`, `docker images`, Postman/curl requests, stopping/starting `billing-app`).
+
 
 ### Step 9: Makefile & Automation Harness
 
