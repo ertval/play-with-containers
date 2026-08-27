@@ -92,9 +92,8 @@ play-with-containers/
 │   └── test_audit.sh              # Bonus: automated end-to-end verification (audit flow)
 ├── docs/
 │   ├── requirements/              # Subject readme.md and audit.md
-│   └── implementation-plan.md     # This plan
 │   ├── implementation-plan.md     # This plan
-│   └── audit_preparation.md       # Comprehensive theoretical study guide & 15-question audit prep
+│   └── audit_preparation.md       # Comprehensive 15-question audit preparation guide
 └── srcs/
     ├── api-gateway-app/
     │   ├── Dockerfile             # FROM alpine:3.23.5 (multi-layer cached, non-root, curl/wget for healthcheck)
@@ -368,8 +367,6 @@ play-with-containers/
   ```
 
 - No `version:` field; `name: play-with-containers` optional top-level.
-
-### Step 8: Comprehensive README & Audit Study Guide
 ### Step 8: Documentation & Theoretical Audit Preparation Guide
 
 - Prerequisites (Linux, Docker Engine 24+, Docker Compose v2.20+, `make`, `curl`/`Postman`).
@@ -404,11 +401,12 @@ A standalone, exhaustive educational guide tailored for the student to master ev
 - **Part 1: In-Depth Theoretical Foundations**:
   1. *Containers vs. Virtual Machines*: OS kernel sharing, Linux isolation primitives (Namespaces: `pid`, `net`, `ipc`, `mnt`, `uts`, `user`; Control Groups: `cgroups v2` for CPU, memory, I/O limits), hypervisors (Type 1 vs Type 2), overhead, density, startup speed comparison.
   2. *Docker Engine & Architecture*: Client-Server model, `dockerd`, `containerd`, `runc`, OCI runtime and image specifications.
-  3. *Dockerfile Deep-Dive & Layer Mechanics*: Union file systems (`overlay2`), layer caching, instruction anatomy (`FROM`, `RUN`, `COPY`, `WORKDIR`, `USER`, `EXPOSE`, `ENV`, `ENTRYPOINT` vs `CMD` exec vs shell forms).
-  4. *Docker Volumes & Data Persistence*: Anonymous vs. Named vs. Bind Mounts, container write layers vs persistent storage, lifecycle across container removal.
-  5. *Docker Networking & Service Discovery*: User-defined bridge networks, container embedded DNS (`127.0.0.11`), network namespaces, port publishing (`-p host:container`) vs internal exposure (`EXPOSE`).
-  6. *Microservices Architecture*: Principles (Single Responsibility, loose coupling, high cohesion, domain-driven boundaries), benefits (fault isolation, independent scalability, polyglot technology), tradeoffs vs monoliths (network latency, distributed state, orchestration complexity).
-  7. *Message Queuing & RabbitMQ*: Asynchronous decoupling vs synchronous HTTP blocking, AMQP 0-9-1 protocol mechanics, Producer/Exchange/Binding/Queue/Consumer lifecycle, Exchange routing types (`direct`, `fanout`, `topic`, `headers`), Message durability (`delivery_mode=2`), consumer acknowledgments (`basic_ack` vs `basic_nack`), prefetch count (`basic_qos`).
+  3. *Dockerfile Deep-Dive & Layer Mechanics*: Union file systems (`overlay2`), layer caching, avoiding duplicate layers, instruction anatomy (`FROM`, `RUN`, `COPY`, `WORKDIR`, `USER`, `EXPOSE`, `ENV`, `ENTRYPOINT` vs `CMD` exec vs shell forms) — answers "What is Dockerfile? Explain instructions".
+  4. *Docker Images & Build*: Read-only template, OCI image spec, image vs container vs Dockerfile, layer content-addressability, `docker images` REPOSITORY/TAG, why images are built not pulled (subject forbids pre-built except Alpine/Debian), image naming `image: == service` — answers "What is Docker image? Why use?".
+  5. *Docker Volumes & Data Persistence*: Anonymous vs. Named vs. Bind Mounts, container write layers vs persistent storage, lifecycle across container removal — answers "What is volume? Why use?".
+  6. *Docker Networking & Service Discovery*: User-defined bridge networks, container embedded DNS (`127.0.0.11`), network namespaces, port publishing (`-p host:container`) vs internal exposure (`EXPOSE`), why isolated bridge needed, only gateway `3000` exposed — answers "What is network? Why use?".
+  7. *Microservices Architecture*: Principles (Single Responsibility, loose coupling, high cohesion, domain-driven boundaries), benefits (fault isolation, independent scalability, polyglot), tradeoffs vs monoliths (network latency, distributed state) — answers "What is microservices? Why use?".
+  8. *Message Queuing & RabbitMQ*: Queue definition (FIFO buffer, decoupling), async vs sync HTTP blocking, AMQP 0-9-1, Producer/Exchange/Binding/Queue/Consumer, exchange types (`direct`, `fanout`, `topic`, `headers`), durability (`delivery_mode=2` + `durable=True`), acks (`basic_ack`/`basic_nack`), prefetch (`basic_qos`) — answers "What is queue? What is RabbitMQ?".
 - **Part 2: Question-by-Question Model Answers for Audit (15 Questions)**:
   - Verbatim text of every question from `docs/requirements/audit.md`.
   - Structured 3-tier response format for each question:
