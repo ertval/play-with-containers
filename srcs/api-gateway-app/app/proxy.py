@@ -75,3 +75,4 @@ def create_billing_order():
     except Exception as e:
         logger.error(f"Failed to queue billing message: {e}")
         return jsonify({"error": f"Failed to submit order to queue: {str(e)}"}), 500
+

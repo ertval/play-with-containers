@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 # Base image: Alpine 3.23 (penultimate stable release)
-# base-digest: sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 FROM alpine:3.23
 
 WORKDIR /usr/src/app
@@ -19,7 +18,7 @@ COPY server.py openapi.yaml ./
 COPY app/ ./app/
 
 # Smoke test import assertion at build time
-RUN python3 -c "import flask, werkzeug, waitress, pika, requests, yaml"
+RUN python3 -c "import flask, waitress, pika, requests, yaml"
 
 # Named volume mount point for persistent gateway logs
 RUN mkdir -p /usr/src/logs

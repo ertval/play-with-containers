@@ -44,6 +44,7 @@ config:
 	docker compose config --quiet && echo "compose OK"
 
 lint:
+	hadolint srcs/**/Dockerfile
 	@if command -v hadolint >/dev/null 2>&1; then \
 		hadolint srcs/**/Dockerfile; \
 	elif command -v docker >/dev/null 2>&1; then \

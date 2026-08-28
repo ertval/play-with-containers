@@ -52,3 +52,4 @@ class RabbitMQSender:
 
         logger.error(f"Failed to publish message after {max_retries} attempts: {last_exception}")
         raise RuntimeError(f"Could not publish message to RabbitMQ: {last_exception}")
+

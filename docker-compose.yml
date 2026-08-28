@@ -19,7 +19,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 60s
+      start_period: 40s
 
   billing-database:
     build: ./srcs/billing-database
@@ -41,7 +41,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 60s
+      start_period: 40s
 
   rabbit-queue:
     build: ./srcs/rabbit-queue

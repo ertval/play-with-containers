@@ -22,3 +22,4 @@ if __name__ == "__main__":
     logger.info(f"Billing consumer background thread started. Launching HTTP server on 0.0.0.0:{port}...")
 
     serve(app, host="0.0.0.0", port=port)
+

@@ -216,3 +216,4 @@ else
     echo -e "${RED}SOME AUDIT CHECKS FAILED!${NC}"
     exit 1
 fi
+

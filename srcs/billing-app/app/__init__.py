@@ -56,3 +56,4 @@ def create_app():
 
     app.session_factory = session_factory
     return app, session_factory
+

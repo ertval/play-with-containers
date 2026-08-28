@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 # Base image: Alpine 3.23 (penultimate stable release)
-# base-digest: sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 FROM alpine:3.23
 
 RUN apk add --no-cache \
@@ -16,7 +15,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 5672 15672
 
-HEALTHCHECK --interval=10s --timeout=10s --start-period=90s --retries=30 \
+HEALTHCHECK --interval=10s --timeout=10s --start-period=60s --retries=15 \
     CMD rabbitmq-diagnostics -q ping || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

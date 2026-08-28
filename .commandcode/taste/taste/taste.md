@@ -14,3 +14,5 @@
 - When moving content out of a README into `docs/`, replace the removed section with a "Documentation Index" table (each doc + one-line purpose, with links) so the README remains the discovery hub rather than just losing the section. Confidence: 0.6
 - Audit-prep answers should be evidence-backed rather than textbook-generic: cite the concrete repo artifacts that enforce each answer (exact commands with verbatim expected outputs, Dockerfile/compose/source references). Confidence: 0.6
 - Finish multi-step file-producing tasks with a final verification pass (e.g., `ls`/`wc -l` over the produced files) before reporting completion. Confidence: 0.6
+- When a spawned subagent runs out of context or fails mid-task, fall back to doing the verification work directly rather than abandoning it — and the direct pass can be more thorough than the subagent's. Confidence: 0.7
+- Prefer programmatic verification of technical claims: Python heredoc scripts that read source files, run `re.findall`/substring checks, and emit structured `[OK]/[FAIL]` output with file:line evidence — rather than ad-hoc shell greps that have to be reasoned about one at a time. Confidence: 0.7

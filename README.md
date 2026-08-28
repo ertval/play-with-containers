@@ -1,19 +1,4 @@
-<div align="center">
-
 # Play with Containers
-
-![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Flask](https://img.shields.io/badge/Flask-3.x-000000?style=for-the-badge&logo=flask&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![RabbitMQ](https://img.shields.io/badge/RabbitMQ-Message_Broker-FF6600?style=for-the-badge&logo=rabbitmq&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Engine_24+-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![Docker Compose](https://img.shields.io/badge/Docker_Compose-v2-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-3.23-0D597F?style=for-the-badge&logo=alpinelinux&logoColor=white)
-![Waitress](https://img.shields.io/badge/Waitress-WSGI_Server-4B8BBE?style=for-the-badge)
-![Swagger](https://img.shields.io/badge/OpenAPI-Swagger_UI-85EA2D?style=for-the-badge&logo=swagger&logoColor=black)
-![Make](https://img.shields.io/badge/GNU_Make-Lifecycle_Tasks-427819?style=for-the-badge&logo=gnu&logoColor=white)
-
-</div>
 
 A high-performance, fault-tolerant 6-service microservices infrastructure built with Docker and managed exclusively by Docker Compose. This project adheres strictly to all requirements from the `play-with-containers` subject and audit specification, featuring custom Alpine-based Docker images, named persistent volumes, isolated bridge networking, internal service discovery, and resilient asynchronous queue processing via RabbitMQ.
 
@@ -111,7 +96,6 @@ cp .env.example .env
 | `RABBITMQ_QUEUE` | `billing_queue` | Target queue name for order processing |
 | `INVENTORY_APP_HOST` | `inventory-app` | Internal hostname for inventory service |
 | `INVENTORY_APP_PORT` | `8080` | Internal port for inventory service |
-| `BILLING_APP_HOST` | `billing-app` | Internal hostname for billing service |
 | `BILLING_APP_PORT` | `8080` | Internal port for billing service |
 | `GATEWAY_PORT` | `3000` | Host and container port for API Gateway |
 
@@ -341,13 +325,102 @@ This project adopts and improves upon the architecture from `crud-master-py`:
 
 ---
 
-## 9. Documentation Index
+## 9. Appendix: Theoretical & Oral Exam Study Guide
 
-| Document | Purpose |
-|---|---|
-| [`docs/theory-study-guide.md`](docs/theory-study-guide.md) | Generalized theory reference — containers, Docker internals, networking, storage, microservices, RabbitMQ/AMQP, security — with examples. Independent of this implementation. |
-| [`docs/audit-preparation.md`](docs/audit-preparation.md) | Complete audit preparation — every checklist question from `docs/requirements/audit.md` answered for this project, expected command outputs, outage-resilience walkthrough, bonus section, anticipated extra questions, and a command cheat sheet. |
-| [`docs/requirements/audit.md`](docs/requirements/audit.md) | Verbatim audit checklist (source of truth). |
-| [`docs/requirements/readme.md`](docs/requirements/readme.md) | Subject statement. |
-| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Implementation plan and audit coverage map. |
+This section contains thorough answers to all conceptual and architectural questions listed in the audit guide:
+
+### Q1: What are containers and what are their advantages?
+> **Answer**: A container is a lightweight, standalone, executable software package that bundles application code together with all of its libraries, system tools, and runtime dependencies.
+> 
+> **Advantages**:
+> - **Portability**: Runs consistently across development, staging, and production environments ("build once, run anywhere").
+> - **Lightweight & High Efficiency**: Shares the host OS kernel rather than virtualizing hardware, resulting in seconds-fast startup times and minimal CPU/RAM overhead.
+> - **Isolation**: Uses Linux namespaces (PID, NET, MNT, IPC, UTS, USER) and Control Groups (cgroups) to isolate process execution and constrain resource usage.
+> - **Immutability & Reproducibility**: Container images are versioned and immutable, eliminating environment drift.
+
+---
+
+### Q2: What is the difference between containers and virtual machines (VMs)?
+> **Answer**:
+> - **Virtual Machines (Hardware-level Virtualization)**:
+>   - Each VM packages a complete Guest Operating System (GBs in size) running on top of a Hypervisor (e.g., KVM, VMware, Hyper-V).
+>   - Higher resource overhead, longer boot times (minutes), and redundant kernel duplication.
+> - **Containers (OS-level Virtualization)**:
+>   - Containers share the host system's Linux kernel and only package user-space application binaries and dependencies (MBs in size).
+>   - No hypervisor or guest OS overhead, near-instantaneous startup, and native bare-metal execution performance.
+
+---
+
+### Q3: What is Docker and what is it used for?
+> **Answer**: Docker is an open-source platform-as-a-service (PaaS) framework that automates the building, packaging, shipping, and running of applications within lightweight containers. It consists of the Docker Engine daemon (`dockerd`), Docker CLI client, Docker images, and Docker Compose orchestration tools.
+
+---
+
+### Q4: What is a microservices architecture and why do we use it?
+> **Answer**: A microservices architecture is a software design pattern where a complex application is structured as a collection of small, loosely coupled, independently deployable services. Each service handles a distinct business domain (e.g., Catalogue/Inventory, Billing/Orders, API Gateway), owns its private database, and communicates via well-defined protocols (HTTP REST, AMQP).
+>
+> **Why we use it**:
+> - **Independent Scalability**: High-traffic services can be scaled horizontally without scaling the entire application.
+> - **Fault Isolation**: A crash in one service (e.g. `billing-app`) does not take down unrelated services (e.g. `inventory-app`).
+> - **Polyglot & Modular Technology**: Services can leverage different tech stacks suited for their specific domain.
+> - **Continuous Delivery**: Smaller codebases enable rapid, low-risk deployments by distributed teams.
+
+---
+
+### Q5: What is a queue and what is it used for?
+> **Answer**: A queue is a First-In-First-Out (FIFO) data structure used in message-oriented middleware for asynchronous inter-process communication.
+>
+> **What it is used for**:
+> - **Temporal Decoupling**: Producers and consumers do not need to execute at the same time. Producers can publish messages even if consumers are temporarily offline.
+> - **Load Leveling (Buffering / Throttling)**: Absorbs bursts of traffic and prevents backend databases or worker nodes from being overwhelmed.
+> - **Reliability & Delivery Guarantees**: Persists messages to durable storage until acknowledged (`ack`) by a worker.
+
+---
+
+### Q6: What is RabbitMQ?
+> **Answer**: RabbitMQ is an enterprise open-source message broker that implements the Advanced Message Queuing Protocol (AMQP 0-9-1). It acts as an intermediary that accepts messages from producers, routes them through exchanges using binding keys, buffers them in queues, and delivers them to consumers with delivery acknowledgments, quality-of-service (prefetch limits), and clustering capabilities.
+
+---
+
+### Q7: What is a Dockerfile and what do its instructions do?
+> **Answer**: A Dockerfile is a text file containing ordered instructions used by the Docker Engine to build a container image layer by layer.
+>
+> **Key Instructions**:
+> - `FROM`: Defines the parent base image (e.g. `FROM alpine:3.23`).
+> - `WORKDIR`: Sets the current working directory inside the container for subsequent instructions.
+> - `RUN`: Executes shell commands during image build time to install packages and configure dependencies (each creates a new image layer).
+> - `COPY`: Copies files or directories from the build context on the host machine into the container filesystem.
+> - `ENV`: Sets persistent environment variables accessible during build and runtime.
+> - `EXPOSE`: Documents the network ports on which the container listens at runtime (metadata documentation for internal networking).
+> - `HEALTHCHECK`: Specifies a command test to verify container operational health.
+> - `ENTRYPOINT`: Configures the default executable to run when the container starts.
+> - `CMD`: Provides default arguments or fallback command for the `ENTRYPOINT`.
+
+---
+
+### Q8: What is a Docker volume and why do we use it?
+> **Answer**: A Docker volume is a storage directory managed by the Docker daemon located outside the Union File System (typically under `/var/lib/docker/volumes/`).
+>
+> **Why we use it**:
+> - **Data Persistence**: Container root filesystems are ephemeral (destroyed when a container is removed). Volumes preserve persistent database files and application logs across container recreations.
+> - **Performance**: Volumes bypass the copy-on-write storage driver, providing native host filesystem I/O performance.
+> - **Sharing & Backups**: Can be mounted across multiple containers or easily backed up and migrated.
+
+---
+
+### Q9: What is a Docker network and why do we use it?
+> **Answer**: A Docker network is a software-defined virtual network that enables isolated communication between containers on the same host or across hosts.
+>
+> **Why we use it**:
+> - **Service Discovery via Automatic DNS**: Containers on the same user-defined bridge network can resolve each other using their service/container names (e.g. `http://inventory-app:8080` or `inventory-database:5432`) without hardcoding dynamic IP addresses.
+> - **Security & Perimeter Isolation**: Containers on a private bridge network cannot be reached from outside the Docker host unless explicitly published via `ports:`.
+
+---
+
+### Q10: What is a Docker image and why do we use it?
+> **Answer**: A Docker image is an immutable, read-only template consisting of stacked layers that defines the environment, filesystem, libraries, and binaries required to run an application.
+>
+> **Why we use it**:
+> - It represents the blueprint from which multiple identical running container instances are instantiated.
+> - It ensures complete reproducibility across development, testing, CI/CD, and production.
 

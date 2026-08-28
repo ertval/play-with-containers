@@ -104,3 +104,4 @@ def start_consuming(db_session_factory, stop_event=None):
                     connection.close()
                 except Exception:
                     pass
+

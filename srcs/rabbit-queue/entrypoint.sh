@@ -44,3 +44,4 @@ rabbitmqctl delete_user guest 2>/dev/null || true
 
 echo "[rabbit-queue] RabbitMQ configuration complete. Monitoring process PID $SERVER_PID..."
 wait "$SERVER_PID"
+

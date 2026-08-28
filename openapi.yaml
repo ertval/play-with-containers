@@ -212,3 +212,4 @@ components:
         description:
           type: string
           example: Very short description
+

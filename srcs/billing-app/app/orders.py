@@ -28,3 +28,4 @@ def get_db_engine(db_url):
 def init_db(engine):
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
+

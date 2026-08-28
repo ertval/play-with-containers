@@ -46,3 +46,4 @@ fi
 
 echo "[init-db] Starting PostgreSQL server..."
 exec su-exec postgres postgres -D "$PGDATA" -h "*"
+

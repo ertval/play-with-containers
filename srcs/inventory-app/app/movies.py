@@ -84,3 +84,4 @@ def delete_all_movies():
     deleted_count = db.session.query(Movie).delete()
     db.session.commit()
     return jsonify({"message": f"All {deleted_count} movies deleted"}), 200
+
