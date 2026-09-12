@@ -12,6 +12,19 @@ import unittest
 import urllib.request
 import urllib.error
 
+# Auto-load variables from .env if present
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.isfile(env_path):
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+    except Exception:
+        pass
+
 GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = os.getenv("GATEWAY_PORT", "3000")
 BASE_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
@@ -139,6 +152,37 @@ class TestLiveAPIGateway(unittest.TestCase):
         del_req = urllib.request.Request(f"{BASE_URL}/api/movies/{movie_id}", method="DELETE")
         with urllib.request.urlopen(del_req, timeout=5) as resp:
             self.assertEqual(resp.status, 200)
+
+    def test_inventory_movie_filter(self):
+        # 1. Create a movie to search for
+        payload = json.dumps({"title": "FilterSearchMovieUnique", "description": "Desc"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{BASE_URL}/api/movies/",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        movie_id = None
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                created = json.loads(resp.read().decode("utf-8"))
+                movie_id = created.get("id")
+
+            # 2. Filter by substring query
+            filter_req = urllib.request.Request(f"{BASE_URL}/api/movies?title=SearchMovieUnique")
+            with urllib.request.urlopen(filter_req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode("utf-8"))
+                titles = [m.get("title") for m in data.get("movies", [])]
+                self.assertIn("FilterSearchMovieUnique", titles)
+        finally:
+            if movie_id is not None:
+                del_req = urllib.request.Request(f"{BASE_URL}/api/movies/{movie_id}", method="DELETE")
+                try:
+                    urllib.request.urlopen(del_req, timeout=5)
+                except Exception:
+                    pass
 
     def test_billing_order_enqueue(self):
         payload = json.dumps({

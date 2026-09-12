@@ -25,17 +25,46 @@ log_fail() {
     FAIL_COUNT=$((FAIL_COUNT + 1))
 }
 
-GATEWAY_HOST="127.0.0.1"
-GATEWAY_PORT="3000"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source <(sed -e 's/\r$//' -e '/^#/d' -e '/^$/d' "$REPO_ROOT/.env")
+    set +a
+fi
+
+GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
+GATEWAY_PORT="${GATEWAY_PORT:-3000}"
 BASE_URL="http://${GATEWAY_HOST}:${GATEWAY_PORT}"
+BILLING_DB_USER="${BILLING_DB_USER:-billing_user}"
+BILLING_DB_NAME="${BILLING_DB_NAME:-billing_db}"
 
 echo "============================================================"
 echo "   Play with Containers - Automated Audit Verification"
 echo "============================================================"
 
+# Verify Docker availability
+if ! command -v docker >/dev/null 2>&1; then
+    log_fail "Docker CLI not found in PATH. Please install or activate Docker."
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    log_fail "Docker daemon is not running or unreachable. Please start Docker."
+    exit 1
+fi
+
+if docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+else
+    DOCKER_COMPOSE="docker compose"
+fi
+
 # Ensure stack is up
 log_info "Ensuring infrastructure is up..."
-docker compose up -d --wait --wait-timeout 120
+$DOCKER_COMPOSE up -d --wait --wait-timeout 120
 
 SERVICES=("inventory-database" "billing-database" "rabbit-queue" "inventory-app" "billing-app" "api-gateway-app")
 
@@ -43,7 +72,7 @@ echo ""
 echo "--- 1. Verification of Containers and Image Names ---"
 for s in "${SERVICES[@]}"; do
     img=$(docker inspect -f '{{.Config.Image}}' "$s" 2>/dev/null || true)
-    if [ "$img" == "$s" ]; then
+    if [ "$img" = "$s" ]; then
         log_pass "Container '$s' uses image '$img'"
     else
         log_fail "Container '$s' has image '$img' (expected '$s')"
@@ -54,7 +83,7 @@ echo ""
 echo "--- 2. Verification of Restart Policy ---"
 for s in "${SERVICES[@]}"; do
     rp=$(docker inspect -f '{{.HostConfig.RestartPolicy}}' "$s" 2>/dev/null || true)
-    if [ "$rp" == "{on-failure 0}" ]; then
+    if [ "$rp" = "{on-failure 0}" ]; then
         log_pass "Container '$s' restart policy is exactly {on-failure 0}"
     else
         log_fail "Container '$s' restart policy is '$rp' (expected '{on-failure 0}')"
@@ -164,8 +193,8 @@ sleep 2
 log_info "Stopping billing-app container to test resilience..."
 docker stop billing-app >/dev/null
 
-STATUS=$(docker inspect -f '{{.State.Running}}' billing-app)
-if [ "$STATUS" == "false" ]; then
+STATUS=$(docker inspect -f '{{.State.Running}}' billing-app 2>/dev/null || true)
+if [ "$STATUS" = "false" ]; then
     log_pass "billing-app container is confirmed stopped"
 else
     log_fail "billing-app is still running!"
@@ -188,10 +217,17 @@ fi
 # Restart billing-app and verify consumed message
 log_info "Restarting billing-app container..."
 docker start billing-app >/dev/null
-sleep 4
 
-# Check logs or billing database for order 22
-DB_ORDERS=$(docker exec billing-database psql -U billing_user -d billing_db -t -c "SELECT user_id, number_of_items, total_amount FROM orders WHERE user_id = '22';" 2>/dev/null || true)
+# Check logs or billing database for order 22 with polling retry
+log_info "Awaiting message consumption and persistence to billing-database..."
+DB_ORDERS=""
+for _ in $(seq 1 10); do
+    sleep 1
+    DB_ORDERS=$(docker exec billing-database psql -U "$BILLING_DB_USER" -d "$BILLING_DB_NAME" -t -c "SELECT user_id, number_of_items, total_amount FROM orders WHERE user_id = '22';" 2>/dev/null || true)
+    if echo "$DB_ORDERS" | grep -q "22"; then
+        break
+    fi
+done
 
 if echo "$DB_ORDERS" | grep -q "22"; then
     log_pass "Buffered order (user_id=22) was consumed and persisted to billing-database upon restart"

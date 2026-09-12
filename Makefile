@@ -1,4 +1,7 @@
-.PHONY: up down build logs ps clean rebuild restart help config lint test test-py
+.DEFAULT_GOAL := help
+.PHONY: all up down build logs ps clean rebuild restart help config lint test test-py
+
+all: up
 
 help:
 	@echo "targets:"
