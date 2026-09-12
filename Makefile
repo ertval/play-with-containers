@@ -1,4 +1,4 @@
-.PHONY: up down build logs ps clean rebuild restart help config lint test
+.PHONY: up down build logs ps clean rebuild restart help config lint test test-py
 
 help:
 	@echo "targets:"
@@ -9,6 +9,7 @@ help:
 	@echo "  make config    - validate compose file"
 	@echo "  make lint      - lint Dockerfiles (hadolint)"
 	@echo "  make test      - run audit E2E suite"
+	@echo "  make test-py   - run automated python test suite"
 	@echo "  make restart   - restart all containers"
 	@echo "  make rebuild   - clean rebuild from scratch and start"
 	@echo "  make down      - stop and remove containers + network (keeps volumes)"
@@ -44,7 +45,6 @@ config:
 	docker compose config --quiet && echo "compose OK"
 
 lint:
-	hadolint srcs/**/Dockerfile
 	@if command -v hadolint >/dev/null 2>&1; then \
 		hadolint srcs/**/Dockerfile; \
 	elif command -v docker >/dev/null 2>&1; then \
@@ -58,3 +58,7 @@ lint:
 
 test:
 	bash scripts/test_audit.sh
+
+test-py:
+	python3 scripts/test_api.py
+

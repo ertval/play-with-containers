@@ -10,7 +10,7 @@ class RabbitMQSender:
         self.host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
         self.port = int(os.getenv("RABBITMQ_PORT", "5672"))
         self.user = os.getenv("RABBITMQ_USER", "rabbit_user")
-        self.password = os.getenv("RABBITMQ_PASSWORD", "rabbit_password")
+        self.password = os.getenv("RABBITMQ_PASSWORD", "rabbit_secret_pass")
         self.queue = os.getenv("RABBITMQ_QUEUE", "billing_queue")
 
     def _get_connection(self):

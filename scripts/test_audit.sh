@@ -76,14 +76,17 @@ done
 echo ""
 echo "--- 4. Verification of Port Exposure and Isolation ---"
 # Only 3000 should be mapped on host
-PUBLISHED_PORTS=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep -E '0.0.0.0|:::' || true)
-echo "Published ports across containers:"
+PUBLISHED_PORTS=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep -E 'inventory-database|billing-database|rabbit-queue|inventory-app|billing-app|api-gateway-app' | grep -E '0\.0\.0\.0|::' || true)
+echo "Published ports across project containers:"
 echo "$PUBLISHED_PORTS"
 
-if echo "$PUBLISHED_PORTS" | grep -q "3000->3000" && [ $(echo "$PUBLISHED_PORTS" | wc -l) -eq 1 ]; then
+GATEWAY_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep "api-gateway-app" || true)
+OTHER_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep -v "api-gateway-app" || true)
+
+if echo "$GATEWAY_PUBLISHED" | grep -q "3000->3000" && [ -z "$OTHER_PUBLISHED" ]; then
     log_pass "Only api-gateway-app published port 3000 on host"
 else
-    log_fail "Port publication check failed: unexpected exposed ports found"
+    log_fail "Port publication check failed: unexpected exposed ports found ($PUBLISHED_PORTS)"
 fi
 
 # Assert external host curl to internal ports 5432, 8080, 5672 is refused
@@ -97,7 +100,8 @@ done
 
 echo ""
 echo "--- 5. Internal Network Connectivity ---"
-if docker exec api-gateway-app wget -qO- http://inventory-app:8080/health >/dev/null 2>&1; then
+if docker exec api-gateway-app python3 -c "import urllib.request; urllib.request.urlopen('http://inventory-app:8080/health')" >/dev/null 2>&1 || \
+   docker exec api-gateway-app wget -qO- http://inventory-app:8080/health >/dev/null 2>&1; then
     log_pass "Internal communication (api-gateway-app -> inventory-app:8080) OK"
 else
     log_fail "Internal communication between containers failed"

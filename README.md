@@ -134,6 +134,9 @@ make rebuild
 
 # Run full automated audit test suite
 make test
+
+# Run automated Python test suite
+make test-py
 ```
 
 Alternatively, direct `docker compose` commands can be used:

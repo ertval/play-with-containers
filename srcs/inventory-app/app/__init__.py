@@ -16,7 +16,7 @@ def create_app():
     app = Flask(__name__)
 
     db_user = os.getenv("INVENTORY_DB_USER", "inventory_user")
-    db_password = os.getenv("INVENTORY_DB_PASSWORD", "inventory_password")
+    db_password = os.getenv("INVENTORY_DB_PASSWORD", "inventory_secret_pass")
     db_host = os.getenv("INVENTORY_DB_HOST", "inventory-database")
     db_port = os.getenv("INVENTORY_DB_PORT", "5432")
     db_name = os.getenv("INVENTORY_DB_NAME", "inventory_db")

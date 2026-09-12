@@ -15,7 +15,7 @@ def create_app():
     app = Flask(__name__)
 
     db_user = os.getenv("BILLING_DB_USER", "billing_user")
-    db_password = os.getenv("BILLING_DB_PASSWORD", "billing_password")
+    db_password = os.getenv("BILLING_DB_PASSWORD", "billing_secret_pass")
     db_host = os.getenv("BILLING_DB_HOST", "billing-database")
     db_port = os.getenv("BILLING_DB_PORT", "5432")
     db_name = os.getenv("BILLING_DB_NAME", "billing_db")

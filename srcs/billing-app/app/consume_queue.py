@@ -11,7 +11,7 @@ def start_consuming(db_session_factory, stop_event=None):
     rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
     rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
     rabbitmq_user = os.getenv("RABBITMQ_USER", "rabbit_user")
-    rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "rabbit_password")
+    rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "rabbit_secret_pass")
     queue_name = os.getenv("RABBITMQ_QUEUE", "billing_queue")
 
     credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
