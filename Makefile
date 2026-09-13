@@ -19,7 +19,9 @@ help:
 	@echo "  make clean     - down AND remove volumes (all data lost)"
 
 up:
-	docker compose up --build -d
+	# Requires Docker Compose v2 (docker compose). --wait/--wait-timeout need
+	# v2.1+; fallback on older Compose: docker compose up --build -d
+	docker compose up --build -d --wait --wait-timeout 120
 
 build:
 	docker compose build

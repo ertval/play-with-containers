@@ -7,11 +7,24 @@ from app.orders import Order
 
 logger = logging.getLogger(__name__)
 
+
+def _require_env(name: str) -> str:
+    """Return required secret env var or raise (no hardcoded fallback for secrets)."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required secret environment variable: {name}. "
+            "Set it via .env / compose environment (see .env.example)."
+        )
+    return value
+
+
 def start_consuming(db_session_factory, stop_event=None):
+    # Non-secrets keep safe defaults; secrets MUST come from env.
     rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
     rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
-    rabbitmq_user = os.getenv("RABBITMQ_USER", "rabbit_user")
-    rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "rabbit_secret_pass")
+    rabbitmq_user = _require_env("RABBITMQ_USER")
+    rabbitmq_password = _require_env("RABBITMQ_PASSWORD")
     queue_name = os.getenv("RABBITMQ_QUEUE", "billing_queue")
 
     credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)

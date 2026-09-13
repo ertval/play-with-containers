@@ -19,8 +19,9 @@ RUN chmod +x /usr/local/bin/init-db.sh
 
 EXPOSE 5432
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=10 \
-    CMD pg_isready -U postgres -h 127.0.0.1 || exit 1
+# No image-level HEALTHCHECK: docker-compose.yml is the source of truth and
+# probes with the runtime ${DB_USER}/${DB_NAME} (image has no access to them).
+# Compose defines: pg_isready -U "${DB_USER}" -d "${DB_NAME}".
 
 ENTRYPOINT ["/usr/local/bin/init-db.sh"]
 

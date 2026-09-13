@@ -26,11 +26,34 @@ log_fail() {
 }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Safe .env loader: KEY=VAL lines only, no source/eval (values stay literal,
+# so backticks/$()/$(...) in values can never execute). KEY must match
+# ^[A-Za-z_][A-Za-z0-9_]*= ; surrounding single/double quotes stripped once.
 if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source <(sed -e 's/\r$//' -e '/^#/d' -e '/^$/d' "$REPO_ROOT/.env")
-    set +a
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$line" in ''|\#*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        # Trim surrounding whitespace from key only (values keep inner spaces).
+        key="$(printf '%s' "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        case "$key" in
+            ''|*[!A-Za-z0-9_]*|[0-9]*) continue ;;
+            *) case "$key" in [A-Za-z_]*) ;; *) continue ;; esac ;;
+        esac
+        # Strip one level of matching surrounding quotes (no escape processing).
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        # Only set if not already exported; assignment via printf -v/export arg
+        # performs no evaluation of the value.
+        if [ -z "${!key+x}" ]; then
+            printf -v "$key" '%s' "$val"
+            export "$key"
+        fi
+    done < "$REPO_ROOT/.env"
 fi
 
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"

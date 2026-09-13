@@ -12,11 +12,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _require_env(name: str) -> str:
+    """Return required secret env var or raise (no hardcoded fallback for secrets)."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required secret environment variable: {name}. "
+            "Set it via .env / compose environment (see .env.example)."
+        )
+    return value
+
+
 def create_app():
     app = Flask(__name__)
 
-    db_user = os.getenv("INVENTORY_DB_USER", "inventory_user")
-    db_password = os.getenv("INVENTORY_DB_PASSWORD", "inventory_secret_pass")
+    # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
+    db_user = _require_env("INVENTORY_DB_USER")
+    db_password = _require_env("INVENTORY_DB_PASSWORD")
     db_host = os.getenv("INVENTORY_DB_HOST", "inventory-database")
     db_port = os.getenv("INVENTORY_DB_PORT", "5432")
     db_name = os.getenv("INVENTORY_DB_NAME", "inventory_db")

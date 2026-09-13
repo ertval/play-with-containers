@@ -5,12 +5,25 @@ import pika
 
 logger = logging.getLogger(__name__)
 
+
+def _require_env(name: str) -> str:
+    """Return required secret env var or raise (no hardcoded fallback for secrets)."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required secret environment variable: {name}. "
+            "Set it via .env / compose environment (see .env.example)."
+        )
+    return value
+
+
 class RabbitMQSender:
     def __init__(self):
+        # Non-secrets keep safe defaults; secrets MUST come from env.
         self.host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
         self.port = int(os.getenv("RABBITMQ_PORT", "5672"))
-        self.user = os.getenv("RABBITMQ_USER", "rabbit_user")
-        self.password = os.getenv("RABBITMQ_PASSWORD", "rabbit_secret_pass")
+        self.user = _require_env("RABBITMQ_USER")
+        self.password = _require_env("RABBITMQ_PASSWORD")
         self.queue = os.getenv("RABBITMQ_QUEUE", "billing_queue")
 
     def _get_connection(self):
