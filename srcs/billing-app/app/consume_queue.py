@@ -2,8 +2,11 @@ import os
 import json
 import time
 import logging
+import signal
+import threading
 import pika
 from app.orders import Order
+from app.validation import InvalidOrderError, coerce_order_payload
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +19,53 @@ def _require_env(name: str) -> str:
             f"Missing required secret environment variable: {name}. "
             "Set it via .env / compose environment (see .env.example)."
         )
-    return value
+    return value.strip()
+
+
+def _env_or_default(name: str, default: str) -> str:
+    """Non-secret setting with a safe default.
+
+    `os.getenv(name, default)` is not enough: Docker Compose interpolates an
+    *undefined* variable as an empty string, which would defeat the default.
+    """
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def _env_port(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid value for {name}={raw!r}; falling back to {default}.")
+        return default
 
 
 def start_consuming(db_session_factory, stop_event=None):
+    """Consume billing orders from RabbitMQ until `stop_event` is set.
+
+    The consumer runs as PID 1's worker thread. On SIGTERM the process must stop
+    cleanly: leaving `stop_event` unset means the loop never terminates, Docker
+    waits out its 10 s grace period and SIGKILLs the container (exit 137).
+    """
+    if stop_event is None:
+        stop_event = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: (
+                logger.info("Shutdown signal received; stopping queue consumer"),
+                stop_event.set(),
+            ))
+
     # Non-secrets keep safe defaults; secrets MUST come from env.
-    rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbit-queue")
-    rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
+    rabbitmq_host = _env_or_default("RABBITMQ_HOST", "rabbit-queue")
+    rabbitmq_port = _env_port("RABBITMQ_PORT", 5672)
     rabbitmq_user = _require_env("RABBITMQ_USER")
     rabbitmq_password = _require_env("RABBITMQ_PASSWORD")
-    queue_name = os.getenv("RABBITMQ_QUEUE", "billing_queue")
+    queue_name = _env_or_default("RABBITMQ_QUEUE", "billing_queue")
 
     credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
     parameters = pika.ConnectionParameters(
@@ -38,7 +78,7 @@ def start_consuming(db_session_factory, stop_event=None):
 
     logger.info(f"Billing consumer starting up. Target queue: {queue_name} on {rabbitmq_host}:{rabbitmq_port}")
 
-    while stop_event is None or not stop_event.is_set():
+    while not stop_event.is_set():
         connection = None
         try:
             logger.info("Attempting connection to RabbitMQ broker...")
@@ -62,15 +102,8 @@ def start_consuming(db_session_factory, stop_event=None):
 
                 # Robust type coercion according to contract
                 try:
-                    if not isinstance(payload, dict):
-                        raise ValueError("Payload must be a JSON object")
-                    user_id = str(payload.get("user_id", "")).strip()
-                    number_of_items = int(payload.get("number_of_items", 0))
-                    total_amount = float(payload.get("total_amount", 0.0))
-
-                    if not user_id:
-                        raise ValueError("user_id cannot be empty")
-                except Exception as parse_err:
+                    user_id, number_of_items, total_amount = coerce_order_payload(payload)
+                except InvalidOrderError as parse_err:
                     logger.error(f"Invalid order fields in payload {payload}: {parse_err}. Acknowledging and discarding poison message.")
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     return
@@ -78,6 +111,10 @@ def start_consuming(db_session_factory, stop_event=None):
                 # Persist order to billing database with bounded retries
                 db_success = False
                 for retry in range(5):
+                    if stop_event.is_set():
+                        logger.info("Shutdown requested mid-retry; nacking message for redelivery")
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                        return
                     session = db_session_factory()
                     try:
                         order = Order(
@@ -97,18 +134,46 @@ def start_consuming(db_session_factory, stop_event=None):
                     finally:
                         session.close()
 
-                # Always acknowledge once handled (or if persistent DB failures exceeded limit, log and ack to maintain queue flow)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                if not db_success:
-                    logger.error(f"Failed to persist order after retries. Payload: {payload}")
+                if db_success:
+                    # Acknowledge only after the transaction is committed, so a crash
+                    # before this point causes RabbitMQ to redeliver the order.
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                else:
+                    # Never ack a failed insert: that would silently discard a
+                    # customer order. Requeue so another worker (or a later
+                    # delivery of this same message) can process it.
+                    logger.error(f"Failed to persist order after retries; requeueing. Payload: {payload}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+
+            # `start_consuming()` blocks this thread in the AMQP socket read and
+            # never checks stop_event, so a shutdown request would otherwise be
+            # ignored until the next message arrived. A watcher thread closes
+            # the loop through pika's thread-safe callback mechanism.
+            def _stop_on_shutdown():
+                stop_event.wait()
+                try:
+                    connection.add_callback_threadsafe(channel.stop_consuming)
+                except Exception as e:
+                    logger.debug(f"Could not schedule stop_consuming: {e}")
+
+            threading.Thread(
+                target=_stop_on_shutdown,
+                daemon=True,
+                name="BillingQueueShutdownWatcher"
+            ).start()
+
             channel.start_consuming()
 
         except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as amqp_err:
+            if stop_event.is_set():
+                break
             logger.warning(f"RabbitMQ connection lost/unavailable: {amqp_err}. Retrying in 3 seconds...")
             time.sleep(3)
         except Exception as e:
+            if stop_event.is_set():
+                break
             logger.error(f"Unexpected error in consumer loop: {e}. Retrying in 3 seconds...")
             time.sleep(3)
         finally:
@@ -118,3 +183,4 @@ def start_consuming(db_session_factory, stop_event=None):
                 except Exception:
                     pass
 
+    logger.info("Billing queue consumer stopped cleanly.")

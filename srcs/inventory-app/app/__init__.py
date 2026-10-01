@@ -3,6 +3,7 @@ import time
 import logging
 from flask import Flask
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 from app.extensions import db
 from app.movies import movies_bp
 
@@ -30,12 +31,19 @@ def create_app():
     # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
     db_user = _require_env("INVENTORY_DB_USER")
     db_password = _require_env("INVENTORY_DB_PASSWORD")
-    db_host = os.getenv("INVENTORY_DB_HOST", "inventory-database")
-    db_port = os.getenv("INVENTORY_DB_PORT", "5432")
-    db_name = os.getenv("INVENTORY_DB_NAME", "inventory_db")
+    db_host = os.getenv("INVENTORY_DB_HOST", "").strip() or "inventory-database"
+    db_port = os.getenv("INVENTORY_DB_PORT", "").strip() or "5432"
+    db_name = os.getenv("INVENTORY_DB_NAME", "").strip() or "inventory_db"
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = (
-        f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    # URL.create() percent-encodes the password; f-string interpolation would
+    # break on any password containing @ : / ? # or %.
+    app.config["SQLALCHEMY_DATABASE_URI"] = URL.create(
+        "postgresql+psycopg2",
+        username=db_user,
+        password=db_password,
+        host=db_host,
+        port=db_port,
+        database=db_name,
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 

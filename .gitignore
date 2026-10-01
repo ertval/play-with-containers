@@ -25,3 +25,8 @@ logs/
 *.swo
 .DS_Store
 .pytest_cache/
+
+# Local tool scratch directories (not part of the solution)
+.commandcode/
+.codex/
+.claude/

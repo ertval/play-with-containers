@@ -4,6 +4,10 @@ services:
     image: inventory-database
     container_name: inventory-database
     restart: on-failure
+    # Explicit graceful-shutdown window. Without it the daemon default can be
+    # very short, which turns `docker stop` into a SIGKILL and loses in-flight
+    # AMQP messages that the consumer had not yet acknowledged.
+    stop_grace_period: 20s
     environment:
       DB_USER: ${INVENTORY_DB_USER}
       DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
@@ -26,6 +30,7 @@ services:
     image: billing-database
     container_name: billing-database
     restart: on-failure
+    stop_grace_period: 20s
     environment:
       DB_USER: ${BILLING_DB_USER}
       DB_PASSWORD: ${BILLING_DB_PASSWORD}
@@ -52,6 +57,7 @@ services:
     image: rabbit-queue
     container_name: rabbit-queue
     restart: on-failure
+    stop_grace_period: 30s
     environment:
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
@@ -74,6 +80,7 @@ services:
     image: inventory-app
     container_name: inventory-app
     restart: on-failure
+    stop_grace_period: 20s
     environment:
       APP_PORT: 8080
       INVENTORY_DB_HOST: ${INVENTORY_DB_HOST}
@@ -94,6 +101,7 @@ services:
     image: billing-app
     container_name: billing-app
     restart: on-failure
+    stop_grace_period: 20s
     environment:
       APP_PORT: 8080
       BILLING_DB_HOST: ${BILLING_DB_HOST}
@@ -114,13 +122,14 @@ services:
       billing-database:
         condition: service_healthy
       rabbit-queue:
-        condition: service_started
+        condition: service_healthy
 
   api-gateway-app:
     build: ./srcs/api-gateway-app
     image: api-gateway-app
     container_name: api-gateway-app
     restart: on-failure
+    stop_grace_period: 20s
     ports:
       - "3000:3000"
     environment:
@@ -137,10 +146,13 @@ services:
     networks:
       - pwc-network
     depends_on:
+      # service_healthy, not service_started: the gateway binds :3000 the moment
+      # inventory-app merely starts, before it can serve. On a cold boot the
+      # first request would otherwise race the upstream socket and return 502.
       inventory-app:
-        condition: service_started
+        condition: service_healthy
       rabbit-queue:
-        condition: service_started
+        condition: service_healthy
 
 networks:
   pwc-network:

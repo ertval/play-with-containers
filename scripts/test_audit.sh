@@ -77,17 +77,16 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-if docker compose version >/dev/null 2>&1; then
-    DOCKER_COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DOCKER_COMPOSE="docker-compose"
-else
-    DOCKER_COMPOSE="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    log_fail "Docker Compose v2 ('docker compose') is required; this suite needs the --wait flag (v2.1+)."
+    exit 1
 fi
+DOCKER_COMPOSE="docker compose"
 
-# Ensure stack is up
+# Ensure stack is up. The timeout covers a cold boot where the broker alone needs
+# ~40-60 s (depends_on: service_healthy gates the apps behind it).
 log_info "Ensuring infrastructure is up..."
-$DOCKER_COMPOSE up -d --wait --wait-timeout 120
+$DOCKER_COMPOSE up -d --wait --wait-timeout 240
 
 SERVICES=("inventory-database" "billing-database" "rabbit-queue" "inventory-app" "billing-app" "api-gateway-app")
 
@@ -141,12 +140,32 @@ else
     log_fail "Port publication check failed: unexpected exposed ports found ($PUBLISHED_PORTS)"
 fi
 
-# Assert external host curl to internal ports 5432, 8080, 5672 is refused
-for port in 5432 8080 5672 15672; do
-    if curl -s --connect-timeout 2 "http://127.0.0.1:$port" >/dev/null 2>&1; then
-        log_fail "Port $port is unexpectedly reachable from host!"
+# Assert against Docker's own state rather than the host socket. `docker port`
+# is authoritative for "did a container publish this?", whereas probing
+# 127.0.0.1:<port> also succeeds for any unrelated daemon on the host and would
+# report a false failure for a perfectly isolated stack.
+for s in inventory-database billing-database inventory-app billing-app rabbit-queue; do
+    PUBLISHED=$(docker port "$s" 2>/dev/null || true)
+    if [ -z "$PUBLISHED" ]; then
+        log_pass "Container '$s' publishes no host port (isolated)"
     else
-        log_pass "Port $port is properly isolated from host network"
+        log_fail "Container '$s' unexpectedly publishes: $PUBLISHED"
+    fi
+done
+
+# Belt-and-braces: from inside the project network the internal ports must be
+# reachable, which proves they are exposed to containers and not to the host.
+for target in "inventory-database:5432" "billing-database:5432" "rabbit-queue:5672"; do
+    host="${target%%:*}"; port="${target##*:}"
+    if docker exec api-gateway-app python3 -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(3)
+sys.exit(0 if s.connect_ex(('$host', $port)) == 0 else 1)
+" >/dev/null 2>&1; then
+        log_pass "Internal service $host:$port reachable from the project network"
+    else
+        log_fail "Internal service $host:$port is NOT reachable from the project network"
     fi
 done
 
@@ -161,13 +180,30 @@ fi
 
 echo ""
 echo "--- 6. Inventory API Endpoints (Audit Requirements) ---"
+# Unique marker per run so assertions cannot be satisfied by rows left behind by
+# a previous execution, and so repeated runs stay idempotent.
+RUN_MARKER="audit-$$-$(date +%s)"
+SENTINEL_USER="${RUN_MARKER}"
+CREATED_MOVIE_ID=""
+cleanup_inventory() {
+    if [ -n "$CREATED_MOVIE_ID" ]; then
+        curl -s -X DELETE "${BASE_URL}/api/movies/${CREATED_MOVIE_ID}" >/dev/null 2>&1 || true
+    fi
+}
+# Never leave the stack in the audit's "billing-app stopped" state, whatever fails.
+trap 'cleanup_inventory; docker start billing-app >/dev/null 2>&1 || true' EXIT
+
 # POST /api/movies/
 POST_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/movies/" \
     -H "Content-Type: application/json" \
-    -d '{"title": "A new movie", "description": "Very short description"}')
+    -d "{\"title\": \"${RUN_MARKER}\", \"description\": \"Very short description\"}")
 
 HTTP_CODE=$(echo "$POST_RESP" | tail -n1)
 BODY=$(echo "$POST_RESP" | sed '$d')
+
+# Capture the new row's id so cleanup can remove exactly that row (the
+# delete-all route takes no filter and must never be used here).
+CREATED_MOVIE_ID=$(printf '%s' "$BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p')
 
 if [ "$HTTP_CODE" -eq 200 ]; then
     log_pass "POST /api/movies/ returned status 200"
@@ -175,24 +211,36 @@ else
     log_fail "POST /api/movies/ returned status $HTTP_CODE (expected 200): $BODY"
 fi
 
+# The audit's literal payload must also be accepted verbatim.
+AUDIT_POST=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/movies/" \
+    -H "Content-Type: application/json" \
+    -d '{"title": "A new movie", "description": "Very short description"}')
+if [ "$AUDIT_POST" -eq 200 ]; then
+    log_pass "POST /api/movies/ with the audit's exact payload returned 200"
+else
+    log_fail "POST /api/movies/ with the audit's exact payload returned $AUDIT_POST (expected 200)"
+fi
+
 # GET /api/movies/
 GET_RESP=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/movies/")
 HTTP_CODE=$(echo "$GET_RESP" | tail -n1)
 BODY=$(echo "$GET_RESP" | sed '$d')
 
-if [ "$HTTP_CODE" -eq 200 ] && echo "$BODY" | grep -q "A new movie"; then
-    log_pass "GET /api/movies/ returned 200 and body contains last added movie"
+if [ "$HTTP_CODE" -eq 200 ] && echo "$BODY" | grep -q "$RUN_MARKER"; then
+    log_pass "GET /api/movies/ returned 200 and body contains the movie just added"
 else
     log_fail "GET /api/movies/ check failed (HTTP $HTTP_CODE): $BODY"
 fi
 
-# Query filter ?title=new
-FILTER_RESP=$(curl -s "${BASE_URL}/api/movies?title=new")
-if echo "$FILTER_RESP" | grep -q "A new movie"; then
-    log_pass "GET /api/movies?title=new successfully filters by title"
+# Query filter ?title=
+FILTER_RESP=$(curl -s "${BASE_URL}/api/movies?title=${RUN_MARKER}")
+if echo "$FILTER_RESP" | grep -q "$RUN_MARKER"; then
+    log_pass "GET /api/movies?title=... successfully filters by title"
 else
-    log_fail "GET /api/movies?title=new failed to find movie: $FILTER_RESP"
+    log_fail "GET /api/movies?title=... failed to find movie: $FILTER_RESP"
 fi
+
+cleanup_inventory
 
 echo ""
 echo "--- 7. Billing API Endpoints & Queue Resilience ---"
@@ -210,11 +258,24 @@ else
     log_fail "POST /api/billing/ failed with status $HTTP_CODE: $BODY"
 fi
 
+# The audit's literal payload must also be accepted verbatim.
+AUDIT_BILLING=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/api/billing/" \
+    -H "Content-Type: application/json" \
+    -d '{"user_id": "20", "number_of_items": "99", "total_amount": "250"}')
+if [ "$AUDIT_BILLING" -eq 200 ]; then
+    log_pass "POST /api/billing/ with the audit's exact payload returned 200"
+else
+    log_fail "POST /api/billing/ with the audit's exact payload returned $AUDIT_BILLING (expected 200)"
+fi
+
 sleep 2
 
 # Stop billing-app container
 log_info "Stopping billing-app container to test resilience..."
+STOP_START=$(date +%s)
 docker stop billing-app >/dev/null
+STOP_ELAPSED=$(( $(date +%s) - STOP_START ))
+EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' billing-app 2>/dev/null || echo "unknown")
 
 STATUS=$(docker inspect -f '{{.State.Running}}' billing-app 2>/dev/null || true)
 if [ "$STATUS" = "false" ]; then
@@ -223,10 +284,20 @@ else
     log_fail "billing-app is still running!"
 fi
 
+# A graceful SIGTERM shutdown exits 0. Exit 137 means Docker had to SIGKILL the
+# process after its 10 s grace period, i.e. the app ignored SIGTERM.
+if [ "$EXIT_CODE" = "0" ]; then
+    log_pass "billing-app shut down gracefully on SIGTERM (exit 0, ${STOP_ELAPSED}s)"
+else
+    log_fail "billing-app exit code is $EXIT_CODE (expected 0 = graceful SIGTERM shutdown, took ${STOP_ELAPSED}s)"
+fi
+
 # POST /api/billing/ while billing-app is DOWN
+# Uses the audit's exact payload for the status check, plus a run-unique
+# sentinel id so the later persistence assertion can identify this run's row.
 OUTAGE_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/billing/" \
     -H "Content-Type: application/json" \
-    -d '{"user_id": "22", "number_of_items": "10", "total_amount": "50"}')
+    -d "{\"user_id\": \"${SENTINEL_USER}\", \"number_of_items\": \"10\", \"total_amount\": \"50\"}")
 
 HTTP_CODE=$(echo "$OUTAGE_RESP" | tail -n1)
 BODY=$(echo "$OUTAGE_RESP" | sed '$d')
@@ -241,19 +312,22 @@ fi
 log_info "Restarting billing-app container..."
 docker start billing-app >/dev/null
 
-# Check logs or billing database for order 22 with polling retry
-log_info "Awaiting message consumption and persistence to billing-database..."
+# Verify the row produced by THIS run, not one left by a previous run: rows are
+# never deleted, so matching a fixed user_id would pass even if this run's
+# message had been lost. A unique sentinel cannot collide with an earlier run.
+log_info "Awaiting consumption of buffered order (sentinel user_id=${SENTINEL_USER})..."
 DB_ORDERS=""
-for _ in $(seq 1 10); do
+for _ in $(seq 1 15); do
     sleep 1
-    DB_ORDERS=$(docker exec billing-database psql -U "$BILLING_DB_USER" -d "$BILLING_DB_NAME" -t -c "SELECT user_id, number_of_items, total_amount FROM orders WHERE user_id = '22';" 2>/dev/null || true)
-    if echo "$DB_ORDERS" | grep -q "22"; then
+    DB_ORDERS=$(docker exec billing-database psql -U "$BILLING_DB_USER" -d "$BILLING_DB_NAME" -t \
+        -c "SELECT user_id, number_of_items, total_amount FROM orders WHERE user_id = '${SENTINEL_USER}';" 2>/dev/null || true)
+    if echo "$DB_ORDERS" | grep -q "$SENTINEL_USER"; then
         break
     fi
 done
 
-if echo "$DB_ORDERS" | grep -q "22"; then
-    log_pass "Buffered order (user_id=22) was consumed and persisted to billing-database upon restart"
+if echo "$DB_ORDERS" | grep -q "$SENTINEL_USER"; then
+    log_pass "Buffered order (${SENTINEL_USER}) was consumed and persisted after billing-app restart"
 else
     log_fail "Buffered order was not found in billing-database after restart: $DB_ORDERS"
 fi

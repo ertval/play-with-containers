@@ -25,7 +25,7 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
                                  │ inventory-database│                    │ billing-database│
                                  │  (PostgreSQL 17)  │                    │  (PostgreSQL 17)│
                                  └───────────────────┘                    └─────────────────┘
-                                 [Vol: inventory-db]                      [Vol: billing-db]
+                                 [Vol: inventory-database]                [Vol: billing-database]
 
    ─── Single Bridge Network: play-with-containers-network (All services internal except Gateway) ───
    ─── Gateway Log Volume: api-gateway-app mounted at /usr/src/logs ────────────────────────────────
@@ -48,11 +48,13 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 
 - **Alpine 3.23 Penultimate Release**: All 6 Docker images are built from `alpine:3.23`, the penultimate stable release of Alpine Linux (ensuring deterministic musl libc builds, small image footprints, and zero dependence on forbidden Docker Hub pre-built application images).
 - **Strict Network Isolation**: Only the API Gateway publishes port `3000` to the host. Databases (5432), message broker (5672), and internal apps (8080) are strictly unexposed to the host and communicate exclusively over the internal `play-with-containers-network` bridge network.
-- **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Applications use two-tier dependency resolution (`service_healthy` towards databases, `service_started` towards queue) combined with in-application exponential retry loops to prevent Compose deadlocks during cold boots.
-- **Asynchronous Queue Buffering**: When the `billing-app` is stopped or undergoing maintenance, the API Gateway continues accepting orders and returns HTTP `200`. RabbitMQ safely buffers messages in durable storage. As soon as `billing-app` restarts, all queued orders are consumed and inserted into PostgreSQL without data loss.
-- **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway-app`). Database initialization scripts safely guard against re-running `initdb` on pre-existing data volumes.
+- **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Every application and the gateway depend on `service_healthy`, not `service_started`, so no container is reachable before the services behind it can actually answer. Combined with bounded retry loops in each application (30 attempts × 2 s for PostgreSQL, 5 attempts for RabbitMQ publishes) this removes the cold-boot race entirely: the first request after `docker compose up` returns `200`, not `502`.
+- **Asynchronous Queue Buffering**: When the `billing-app` is stopped or undergoing maintenance, the API Gateway continues accepting orders and returns HTTP `200`. RabbitMQ safely buffers messages in durable storage, and the gateway uses publisher confirms so a `200` means the broker actually accepted and persisted the message. As soon as `billing-app` restarts, buffered orders are consumed and inserted into PostgreSQL. An order the consumer could not persist is `nack`ed and requeued rather than acknowledged, so a failed insert is never silently dropped.
+- **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway-app`). The database entrypoints run `initdb` only when the data directory is empty, and reconcile the configured role and database credentials on every boot, so rotating a password in `.env` takes effect on the next `docker compose up`.
 - **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to `stdout` (for `docker compose logs`) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway-app`).
-- **Standard Restart Policy**: All containers enforce `restart: on-failure` (inspects as `{on-failure 0}`), ensuring automated recovery from transient failures.
+- **Standard Restart Policy**: All containers enforce `restart: on-failure` (inspects as `{on-failure 0}`), ensuring automated recovery from transient failures. An explicit `docker stop` still exits `0` and is respected, because only a non-zero exit triggers the policy.
+- **Graceful Shutdown**: Every service handles `SIGTERM` and exits `0` on `docker stop` rather than being `SIGKILL`ed after the grace period. `billing-app` drains its AMQP channel so an unacknowledged message is requeued, and the database images ship `STOPSIGNAL SIGINT` because PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients to disconnect.
+- **Least Privilege & Secret Hygiene**: The three Python services run as a non-root `app` user; only the database and broker images start as root, and they immediately drop to `postgres`/`rabbitmq` via `su-exec`. No secret is baked into any image layer, none is passed as a command-line argument (`psql` and `rabbitmqctl` receive it via a `0600` file and stdin respectively), and the application raises rather than falling back to a hardcoded default if a secret is missing.
 
 ---
 
@@ -60,8 +62,9 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 
 - **Operating System**: Linux (Ubuntu 22.04+, Debian 12+, Alpine 3.19+, Arch, etc.)
 - **Docker Engine**: Docker 24.0+ (or compatible container runtime)
-- **Docker Compose**: Docker Compose v2 (e.g. `docker compose`) or v1 (`docker-compose`)
+- **Docker Compose**: Docker Compose **v2.1+** (`docker compose`). The `make up` target uses `--wait`, which reports container health rather than mere startup; `make up` checks the version and fails with an explicit message if it is too old.
 - **Make** & **curl** (for running the automated Makefile targets and audit tests)
+- **Python 3** (host-side only, for `make test-py`; the stack itself needs nothing installed on the host)
 
 ---
 
@@ -96,10 +99,24 @@ cp .env.example .env
 | `RABBITMQ_QUEUE` | `billing_queue` | Target queue name for order processing |
 | `INVENTORY_APP_HOST` | `inventory-app` | Internal hostname for inventory service |
 | `INVENTORY_APP_PORT` | `8080` | Internal port for inventory service |
-| `BILLING_APP_PORT` | `8080` | Internal port for billing service |
-| `GATEWAY_PORT` | `3000` | Host and container port for API Gateway |
+| `GATEWAY_HOST` | `127.0.0.1` | Host the test scripts target. Not read by `docker-compose.yml`. |
+| `GATEWAY_PORT` | `3000` | Port the test scripts target on the gateway |
 
-> **Note on Credential Rotation**: PostgreSQL initializes roles upon first cluster creation. If you modify database credentials in `.env` after initialization, you must run `make clean` (which removes existing volumes) or perform an in-place `ALTER ROLE` query.
+> **There is deliberately no `BILLING_APP_*` variable.** The gateway never
+> contacts `billing-app`; it only publishes to RabbitMQ. A `BILLING_APP_HOST` key
+> would misleadingly suggest otherwise.
+
+> **Note on credential rotation**: the database entrypoints reconcile the
+> configured role and password on **every** boot, and the broker entrypoint
+> re-applies its credentials if the user already exists. Changing a credential in
+> `.env` and running `make up` is therefore sufficient — you do not need to
+> destroy the volumes. Run `make clean` only if you also want to discard the
+> stored data.
+
+> **Note on placeholder values**: the `*_secret_pass` values above are
+> non-functional placeholders from `.env.example`. They exist so the variable
+> names can be documented; replace them with your own values before deploying
+> anything.
 
 ---
 
@@ -145,12 +162,38 @@ Alternatively, direct `docker compose` commands can be used:
 # Start infrastructure
 docker compose up --build -d
 
+# Start and block until every container reports healthy (recommended)
+docker compose up --build -d --wait --wait-timeout 240
+
 # Stop infrastructure
 docker compose down
 
 # Destroy infrastructure including volumes
 docker compose down -v --remove-orphans
 ```
+
+A cold boot needs roughly 45 seconds: PostgreSQL runs `initdb` (~20 s) and
+RabbitMQ completes `await_startup` plus user provisioning (~35-45 s). Compose
+starts the databases and the broker first, waits for their healthchecks, then
+starts the applications, and starts the gateway last — so by the time port 3000
+accepts a connection, everything behind it can already answer.
+
+---
+
+## 5.1 Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Ports are not available: exposing port TCP 0.0.0.0:3000: bind: address already in use` | Something else on the host holds port 3000 | Find it with `ss -tlnp \| grep 3000`, or change the published side only: `ports: ["3000:3000"]` → `["3001:3000"]` in `docker-compose.yml` |
+| `unknown flag: --wait` | Docker Compose older than v2.1 | Upgrade Compose, or run `docker compose up --build -d` and check `docker compose ps` manually |
+| `make up` times out waiting for a service | Slow host; the broker is the last to become healthy | Raise `--wait-timeout` (currently 240 s) in the `Makefile`, or check `docker compose logs rabbit-queue` |
+| An app container is restarting with `password authentication failed` | Credentials changed in `.env` but the database container has not restarted | `docker compose up -d --force-recreate inventory-database billing-database`. The entrypoints reconcile roles on every boot, so the container must actually restart |
+| An app container is restarting and the log says `ValueError: invalid literal for int()` | A non-numeric value in a `*_PORT` variable in `.env` | Correct the value; the port falls back to its default and logs a warning for a malformed value, but a non-numeric value is a configuration error worth fixing |
+| A port such as `8080` answers on the host | An unrelated host process listens there, not a container | Check with `docker port inventory-app` — if that is empty, nothing is published. Verify isolation with `docker port`, not by curling the port |
+| `make test` reports a port-isolation failure | A previous run left `billing-app` stopped | The suite restarts it on exit; if needed run `docker compose up -d billing-app` |
+| Swagger UI at `/docs` renders blank | The UI assets load from a CDN | Needs internet access. The raw specification at `http://localhost:3000/openapi.yaml` always works |
+| Movies or orders accumulate between test runs | `make test` cleans up after itself, but manual `curl` calls do not | `curl -X DELETE "http://localhost:3000/api/movies?confirm=all"` and `docker compose down -v` to reset |
+| Gateway returns `502` for `/api/movies/` | `inventory-app` is not answering yet, or is down | `docker compose ps` and `docker compose logs inventory-app`. The gateway retries a bounded number of times; a persistent `502` means the upstream is genuinely down |
 
 ---
 
@@ -234,6 +277,20 @@ curl -i -X PUT http://localhost:3000/api/movies/1 \
 curl -i -X DELETE http://localhost:3000/api/movies/1
 ```
 
+#### Delete the Whole Catalogue (DELETE `/api/movies?confirm=all`)
+
+Clearing the catalogue is destructive and reachable unauthenticated through the
+public gateway, so it is refused unless the caller opts in explicitly:
+
+```bash
+curl -i -X DELETE "http://localhost:3000/api/movies?confirm=all"
+```
+
+Without `?confirm=all` the gateway returns `400` and nothing is deleted.
+
+> Both `/api/movies` and `/api/movies/` are accepted; the trailing slash is not
+> significant.
+
 ---
 
 ### 3. Billing API & Queue Resilience Demonstration
@@ -289,6 +346,27 @@ curl -i -X POST http://localhost:3000/api/billing/ \
    docker exec billing-database psql -U billing_user -d billing_db -c "SELECT * FROM orders;"
    ```
 
+   Expected: the order submitted while the worker was down appears in the table.
+   ```console
+    id | user_id | number_of_items | total_amount
+   ----+---------+-----------------+--------------
+     2 | 22      |              10 |           50.00
+   (1 row)
+   ```
+
+6. **Watch it happen** (optional but convincing):
+   ```bash
+   docker logs billing-app --since 60s | grep -E "Connected to RabbitMQ|Successfully processed"
+   ```
+   ```console
+   [INFO] [billing-app] Connected to RabbitMQ. Waiting for billing messages on 'billing_queue'...
+   [INFO] [billing-app] Successfully processed and recorded order #2 for user '22' (items=10, total=$50.00)
+   ```
+
+> `docker stop billing-app` exits `0`, not `137`: the service handles `SIGTERM`
+> and drains its AMQP channel, so an unacknowledged message is requeued rather
+> than lost.
+
 ---
 
 ### 4. Interactive API Documentation (Bonus)
@@ -296,6 +374,10 @@ curl -i -X POST http://localhost:3000/api/billing/ \
 The API Gateway hosts an embedded Swagger UI documentation explorer:
 - Visit `http://localhost:3000/api/docs` or `http://localhost:3000/docs` in your browser.
 - Raw OpenAPI 3.0 specification available at `http://localhost:3000/openapi.yaml`.
+
+> The Swagger UI assets are loaded from a CDN, so the rendered page needs
+> internet access. The raw specification at `/openapi.yaml` is served from the
+> container and always works offline.
 
 ---
 
@@ -310,6 +392,11 @@ The API Gateway hosts an embedded Swagger UI documentation explorer:
 | **POST Status Code** | `200 OK` | Handlers return HTTP 200 upon successful creation and queue enqueueing. | Audit §Inventory & §Billing: *"Can you confirm the response was the success code 200?"* |
 | **Restart Policy** | `restart: on-failure` | Inspects verbatim as `{on-failure 0}` on all 6 containers. | Audit §Check Container restart policy: `docker inspect -f "{{ .HostConfig.RestartPolicy }}"` == `{on-failure 0}`. |
 | **Port Exposure** | Only `3000:3000` published on host | All internal ports (5432, 8080, 5672) use `expose:` and remain unreachable from host network. | Subject §Docker Network & Audit §Check the solution network. |
+| **Startup Gating** | `depends_on` with `condition: service_healthy` everywhere | `service_started` would let the gateway accept requests while `inventory-app` was still connecting to PostgreSQL, producing a `502` on the first cold-boot request. | Subject §Docker Containers: *"Containers must be restarted in case of failure"*; correctness under cold boot. |
+| **Graceful Shutdown** | `SIGTERM` handlers; `STOPSIGNAL SIGINT` on the database images | `docker stop` exits `0` instead of `137`. PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients, and our pooled connections would hang it until the grace period expired. | Keeps an unacknowledged queue message requeued rather than lost. |
+| **Message Acknowledgement** | `basic_nack(requeue=True)` when an insert fails after retries | Acknowledging a failed insert would silently discard a customer order. | Subject §Docker Containers: billing app *"consuming the messages from the RabbitMQ queue"*. |
+| **Non-root Services** | `USER app` in the three Python images | Least privilege. The database and broker images must start as root to drop privileges with `su-exec`; the serving process is `postgres`/`rabbitmq`. | Security hardening beyond the brief. |
+| **Secret Handling** | Secrets from `.env` only; no secret in any image layer or `argv` | `psql` reads the password from a `0600` file, `rabbitmqctl` from stdin, and application code raises rather than defaulting. | Subject: *"the credentials and passwords must be in the `.env` file"*. |
 
 ---
 
@@ -323,8 +410,10 @@ This project adopts and improves upon the architecture from `crud-master-py`:
 | **Database Hosts** | Hardcoded `localhost:5432` / local SQLite | Dynamic environment variables (`${INVENTORY_DB_HOST}`, etc.) | Enables container-to-container service discovery across Docker bridge network. |
 | **HTTP Status Code** | POST returned `201 Created` | POST returns `200 OK` | Conforms strictly to audit assertion criteria. |
 | **Restart Policy** | None / Default (`no`) | `restart: on-failure` across all 6 services | Satisfies audit restart policy check `{on-failure 0}`. |
-| **Healthchecks** | None | Container healthchecks on databases and broker | Prevents startup race conditions and compose startup failures. |
-| **Queue Type Coercion** | Implicit string handling | Explicit coercion (`int(number_of_items)`, `float(total_amount)`, `str(user_id)`) | Prevents poison message spin and worker crashes on string inputs. |
+| **Healthchecks** | None | Healthchecks on all six images, plus health-gated `depends_on` | Prevents startup race conditions; the first request after a cold boot returns `200`. |
+| **Queue Type Coercion** | Implicit string handling | Explicit, validated coercion in a dependency-free module (`app/validation.py`) | Prevents poison-message spin; the rules are now unit-testable on the host. |
+| **WSGI Server** | Flask development server (`app.run()`) | Waitress | Multi-threaded and production-oriented; the development server is single-threaded and not intended for this. |
+| **Database Binding** | `localhost:5432` hardcoded | Docker-DNS service names from environment variables | Service discovery across the bridge network; recreating a container needs no config change. |
 
 ---
 
@@ -427,3 +516,12 @@ This section contains thorough answers to all conceptual and architectural quest
 > - It represents the blueprint from which multiple identical running container instances are instantiated.
 > - It ensures complete reproducibility across development, testing, CI/CD, and production.
 
+---
+
+## 10. Further Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/requirements/readme.md`](docs/requirements/readme.md) | The project brief: objectives, required architecture and constraints |
+| [`docs/requirements/audit.md`](docs/requirements/audit.md) | The audit checklist this project is graded against |
+| [`docs/requirements/AUDIT_GUIDE.md`](docs/requirements/AUDIT_GUIDE.md) | Audit defense manual: every checklist item and oral question, with verification commands and expected output |

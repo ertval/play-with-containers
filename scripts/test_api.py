@@ -12,13 +12,12 @@ Test layers:
     By default live tests SKIP when the gateway is unreachable; set STRICT_LIVE=1
     (or CI=true) to FAIL instead of skip in CI/strict environments.
 
-Note on app validators: the real validation logic lives inline in
-  srcs/inventory-app/app/movies.py (title required/non-blank) and
-  srcs/billing-app/app/consume_queue.py (user_id/items/amount coercion).
-There is no standalone validator module to import without pulling in Flask /
-SQLAlchemy app side effects (create_app connects to Postgres, proxy.py opens
-RabbitMQ at import), so unit tests intentionally mirror that logic and cite the
-source files above instead of importing the apps.
+Note on app validators: the validation rules live in dependency-free modules that
+  these tests import for real, so a passing run means the shipped code agrees
+  with the documented contract:
+    srcs/inventory-app/app/validation.py  (title required / non-blank, description)
+    srcs/billing-app/app/validation.py    (user_id / items / amount coercion)
+The Flask entrypoints that call them are exercised by the live HTTP tests.
 """
 
 import json
@@ -28,6 +27,27 @@ import sys
 import unittest
 import urllib.request
 import urllib.error
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The validators are deliberately dependency-free, so they can be imported on the
+# host without Flask/SQLAlchemy/pika installed. Load them by path rather than by
+# package name to avoid importing either service's __init__ (which opens a
+# database connection).
+def _load_module(name: str, relative_path: str):
+    import importlib.util
+    path = os.path.join(REPO_ROOT, relative_path)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+movie_validation = _load_module("inventory_movie_validation", os.path.join("srcs", "inventory-app", "app", "validation.py"))
+order_validation = _load_module("billing_order_validation", os.path.join("srcs", "billing-app", "app", "validation.py"))
+validate_movie_payload = movie_validation.validate_movie_payload
+coerce_order_payload = order_validation.coerce_order_payload
+InvalidOrderError = order_validation.InvalidOrderError
 
 # Safe .env loader: KEY=VAL lines only (KEY must match ^[A-Za-z_][A-Za-z0-9_]*$).
 # Values are taken literally — no shell eval, no command/backtick expansion.
@@ -61,33 +81,55 @@ BASE_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
 
 
 class TestPayloadValidation(unittest.TestCase):
-    """Unit tests for request payload validation and data type coercion logic."""
+    """Unit tests importing the real validators the services actually call."""
 
     def test_movie_payload_validation(self):
         """Verify title validation rules for inventory movie creation."""
-        valid_payload = {"title": "A new movie", "description": "Very short description"}
-        self.assertTrue(isinstance(valid_payload.get("title"), str))
-        self.assertTrue(bool(valid_payload.get("title", "").strip()))
+        title, description = validate_movie_payload(
+            {"title": "A new movie", "description": "Very short description"}
+        )
+        self.assertEqual(title, "A new movie")
+        self.assertEqual(description, "Very short description")
 
-        # Invalid payloads
-        empty_title_payload = {"title": "   ", "description": "some desc"}
-        self.assertFalse(bool(empty_title_payload["title"].strip()))
+        # Title is trimmed rather than stored with surrounding whitespace.
+        self.assertEqual(validate_movie_payload({"title": "  Padded  "})[0], "Padded")
 
-        missing_title_payload = {"description": "missing title"}
-        self.assertNotIn("title", missing_title_payload)
+        # Missing title
+        with self.assertRaises(ValueError):
+            validate_movie_payload({"description": "missing title"})
+
+        # Blank / whitespace-only title
+        with self.assertRaises(ValueError):
+            validate_movie_payload({"title": "   "})
+
+        # A missing description becomes an empty string, not "None".
+        self.assertEqual(validate_movie_payload({"title": "T"})[1], "")
+
+        # An explicit JSON null description must not be stringified to "None".
+        self.assertEqual(validate_movie_payload({"title": "T", "description": None})[1], "")
+
+        # Non-object bodies are rejected rather than raising TypeError/500.
+        for bad_body in ("a string", 123, ["a", "title"], None):
+            with self.assertRaises(ValueError):
+                validate_movie_payload(bad_body)
+
+    def test_movie_update_allows_partial_body(self):
+        """PUT semantics: description may be updated without a title."""
+        title, description = validate_movie_payload({"description": "only desc"}, require_title=False)
+        self.assertEqual(description, "only desc")
+        self.assertEqual(title, "")
+
+        # But an explicitly blank title is still rejected.
+        with self.assertRaises(ValueError):
+            validate_movie_payload({"title": ""}, require_title=False)
 
     def test_billing_type_coercion(self):
         """Verify explicit coercion of string-formatted numbers from audit payloads."""
-        audit_payload = {
+        user_id, number_of_items, total_amount = coerce_order_payload({
             "user_id": "20",
             "number_of_items": "99",
             "total_amount": "250"
-        }
-
-        # Emulate billing worker coercion logic
-        user_id = str(audit_payload.get("user_id", "")).strip()
-        number_of_items = int(audit_payload.get("number_of_items", 0))
-        total_amount = float(audit_payload.get("total_amount", 0.0))
+        })
 
         self.assertEqual(user_id, "20")
         self.assertEqual(number_of_items, 99)
@@ -96,24 +138,30 @@ class TestPayloadValidation(unittest.TestCase):
         self.assertIsInstance(total_amount, float)
 
     def test_billing_coercion_invalid_values(self):
-        """Verify that malformed numeric strings fail validation cleanly."""
-        invalid_payload = {
-            "user_id": "20",
-            "number_of_items": "not-a-number",
-            "total_amount": "invalid"
-        }
-        with self.assertRaises(ValueError):
-            int(invalid_payload["number_of_items"])
-        with self.assertRaises(ValueError):
-            float(invalid_payload["total_amount"])
+        """Verify that malformed payloads raise InvalidOrderError, not crash the worker."""
+        invalid_payloads = [
+            {"user_id": "20", "number_of_items": "not-a-number", "total_amount": "invalid"},
+            {"user_id": "20", "number_of_items": None, "total_amount": "250"},
+            {"user_id": "20", "number_of_items": "99", "total_amount": "abc"},
+            {"user_id": "   ", "number_of_items": "99", "total_amount": "250"},
+            {"user_id": "", "number_of_items": "99", "total_amount": "250"},
+            {"number_of_items": "99", "total_amount": "250"},
+        ]
+        for payload in invalid_payloads:
+            with self.assertRaises(InvalidOrderError):
+                coerce_order_payload(payload)
+
+        # Non-object bodies (a list, a scalar) are rejected too.
+        for bad_body in ("not json object", 42, ["a"]):
+            with self.assertRaises(InvalidOrderError):
+                coerce_order_payload(bad_body)
 
 
 class TestOpenAPISpecification(unittest.TestCase):
     """Verify presence and required paths in openapi.yaml."""
 
     def test_openapi_file_exists_and_declares_paths(self):
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        openapi_path = os.path.join(repo_root, "openapi.yaml")
+        openapi_path = os.path.join(REPO_ROOT, "openapi.yaml")
         self.assertTrue(os.path.isfile(openapi_path), f"openapi.yaml not found at {openapi_path}")
 
         with open(openapi_path, "r", encoding="utf-8") as f:
@@ -123,8 +171,30 @@ class TestOpenAPISpecification(unittest.TestCase):
         self.assertIn("/health:", content)
         self.assertIn("/api/movies:", content)
         self.assertIn("/api/movies/{id}:", content)
-        self.assertIn("/api/billing/:", content)
+        self.assertIn("/api/billing:", content)
         self.assertIn("openapi: 3.0", content)
+
+    def test_served_spec_matches_repo_copy(self):
+        """The gateway serves srcs/api-gateway-app/openapi.yaml; keep copies identical.
+
+        The Dockerfile copies the srcs/ copy into the image while this suite reads
+        the repository-root copy. If they drift, the suite would validate a
+        specification that no evaluator ever sees.
+        """
+        root_spec = os.path.join(REPO_ROOT, "openapi.yaml")
+        served_spec = os.path.join(REPO_ROOT, "srcs", "api-gateway-app", "openapi.yaml")
+        self.assertTrue(os.path.isfile(served_spec), f"gateway spec not found at {served_spec}")
+
+        with open(root_spec, "r", encoding="utf-8") as f:
+            root_content = f.read()
+        with open(served_spec, "r", encoding="utf-8") as f:
+            served_content = f.read()
+
+        self.assertEqual(
+            root_content,
+            served_content,
+            "openapi.yaml and srcs/api-gateway-app/openapi.yaml have drifted apart",
+        )
 
 
 class TestLiveAPIGateway(unittest.TestCase):

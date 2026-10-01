@@ -1,0 +1,13 @@
+# Match at any depth: a bare `__pycache__/` only excludes one at the context root.
+**/__pycache__/
+__pycache__/
+*.py[cod]
+**/*.py[cod]
+*.so
+.pytest_cache/
+**/.pytest_cache/
+*.log
+.env
+.env.*
+Dockerfile*
+README*

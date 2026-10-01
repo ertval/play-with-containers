@@ -3,6 +3,7 @@ import time
 import logging
 from flask import Flask, jsonify
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 from app.orders import Order, get_db_engine, init_db
 
 logging.basicConfig(
@@ -29,11 +30,20 @@ def create_app():
     # Secrets MUST come from env; host/port/db-name keep safe non-secret defaults.
     db_user = _require_env("BILLING_DB_USER")
     db_password = _require_env("BILLING_DB_PASSWORD")
-    db_host = os.getenv("BILLING_DB_HOST", "billing-database")
-    db_port = os.getenv("BILLING_DB_PORT", "5432")
-    db_name = os.getenv("BILLING_DB_NAME", "billing_db")
+    db_host = os.getenv("BILLING_DB_HOST", "").strip() or "billing-database"
+    db_port = os.getenv("BILLING_DB_PORT", "").strip() or "5432"
+    db_name = os.getenv("BILLING_DB_NAME", "").strip() or "billing_db"
 
-    db_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    # URL.create() percent-encodes the password; f-string interpolation would
+    # break on any password containing @ : / ? # or %.
+    db_url = URL.create(
+        "postgresql+psycopg2",
+        username=db_user,
+        password=db_password,
+        host=db_host,
+        port=db_port,
+        database=db_name,
+    )
     engine = get_db_engine(db_url)
 
     # Retry loop to connect and initialize database schema

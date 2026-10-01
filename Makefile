@@ -5,7 +5,7 @@ all: up
 
 help:
 	@echo "targets:"
-	@echo "  make up        - build and start the whole infrastructure"
+	@echo "  make up        - build and start the whole infrastructure, wait until healthy"
 	@echo "  make build     - build all images"
 	@echo "  make logs      - follow compose logs"
 	@echo "  make ps        - container status"
@@ -14,40 +14,43 @@ help:
 	@echo "  make test      - run audit E2E suite"
 	@echo "  make test-py   - run automated python test suite"
 	@echo "  make restart   - restart all containers"
-	@echo "  make rebuild   - clean rebuild from scratch and start"
+	@echo "  make rebuild   - clean rebuild from scratch (no cache) and start"
 	@echo "  make down      - stop and remove containers + network (keeps volumes)"
 	@echo "  make clean     - down AND remove volumes (all data lost)"
 
+COMPOSE := docker compose
+
 up:
-	# Requires Docker Compose v2 (docker compose). --wait/--wait-timeout need
-	# v2.1+; fallback on older Compose: docker compose up --build -d
-	docker compose up --build -d --wait --wait-timeout 120
+	@$(COMPOSE) version >/dev/null 2>&1 || { \
+		echo "error: Docker Compose v2 ('docker compose') is required."; \
+		echo "       The --wait flag used here needs v2.1+."; exit 1; }
+	$(COMPOSE) up --build -d --wait --wait-timeout 240
 
 build:
-	docker compose build
+	$(COMPOSE) build
 
 logs:
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 ps:
-	docker compose ps
+	$(COMPOSE) ps
 
 restart:
-	docker compose restart
+	$(COMPOSE) restart
 
 rebuild:
-	docker compose down -v --remove-orphans
-	docker compose build --no-cache
-	docker compose up -d
+	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) build --no-cache
+	$(COMPOSE) up -d --wait --wait-timeout 240
 
 down:
-	docker compose down
+	$(COMPOSE) down
 
 clean:
-	docker compose down -v --remove-orphans
+	$(COMPOSE) down -v --remove-orphans
 
 config:
-	docker compose config --quiet && echo "compose OK"
+	$(COMPOSE) config --quiet && echo "compose OK"
 
 lint:
 	@if command -v hadolint >/dev/null 2>&1; then \
