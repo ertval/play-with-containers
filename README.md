@@ -51,7 +51,7 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 - **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Every application and the gateway depend on `service_healthy`, not `service_started`, so no container is reachable before the services behind it can actually answer. Combined with bounded retry loops in each application (30 attempts × 2 s for PostgreSQL, 5 attempts for RabbitMQ publishes) this removes the cold-boot race entirely: the first request after `docker compose up` returns `200`, not `502`.
 - **Asynchronous Queue Buffering**: When the `billing-app` is stopped or undergoing maintenance, the API Gateway continues accepting orders and returns HTTP `200`. RabbitMQ safely buffers messages in durable storage, and the gateway uses publisher confirms so a `200` means the broker actually accepted and persisted the message. As soon as `billing-app` restarts, buffered orders are consumed and inserted into PostgreSQL. An order the consumer could not persist is `nack`ed and requeued rather than acknowledged, so a failed insert is never silently dropped.
 - **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway-app`). The database entrypoints run `initdb` only when the data directory is empty, and reconcile the configured role and database credentials on every boot, so rotating a password in `.env` takes effect on the next `docker compose up`.
-- **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to `stdout` (for `docker compose logs`) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway-app`).
+- **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to the console stream (stderr, captured by `docker compose logs` alongside stdout) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway-app`).
 - **Standard Restart Policy**: All containers enforce `restart: on-failure` (inspects as `{on-failure 0}`), ensuring automated recovery from transient failures. An explicit `docker stop` still exits `0` and is respected, because only a non-zero exit triggers the policy.
 - **Graceful Shutdown**: Every service handles `SIGTERM` and exits `0` on `docker stop` rather than being `SIGKILL`ed after the grace period. `billing-app` drains its AMQP channel so an unacknowledged message is requeued, and the database images ship `STOPSIGNAL SIGINT` because PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients to disconnect.
 - **Least Privilege & Secret Hygiene**: The three Python services run as a non-root `app` user; only the database and broker images start as root, and they immediately drop to `postgres`/`rabbitmq` via `su-exec`. No secret is baked into any image layer, none is passed as a command-line argument (`psql` and `rabbitmqctl` receive it via a `0600` file and stdin respectively), and the application raises rather than falling back to a hardcoded default if a secret is missing.
@@ -62,9 +62,10 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 
 - **Operating System**: Linux (Ubuntu 22.04+, Debian 12+, Alpine 3.19+, Arch, etc.)
 - **Docker Engine**: Docker 24.0+ (or compatible container runtime)
-- **Docker Compose**: Docker Compose **v2.1+** (`docker compose`). The `make up` target uses `--wait`, which reports container health rather than mere startup; `make up` checks the version and fails with an explicit message if it is too old.
-- **Make** & **curl** (for running the automated Makefile targets and audit tests)
+- **Docker Compose**: Docker Compose **v2.17.0+** (`docker compose`). `make up` and `make rebuild` run `docker compose up --build -d --wait --wait-timeout 240`; `--wait` reports container health rather than mere startup, but `--wait-timeout` on `up` only exists from v2.17.0, so older Compose answers `unknown flag: --wait-timeout`. `make up` only checks that `docker compose` is on `PATH` — it does not compare version numbers, so run `docker compose version` yourself. Verified on Docker Compose v5.5.1 / Docker Engine v29.8.1.
+- **Make**, **bash**, **curl**, **grep** & **sed** (for the Makefile targets and `make test`, which runs `scripts/test_audit.sh`)
 - **Python 3** (host-side only, for `make test-py`; the stack itself needs nothing installed on the host)
+- Run every command from the repository root: Compose and the scripts resolve `docker-compose.yml`, `scripts/` and `.env` relative to the current directory.
 
 ---
 
@@ -185,7 +186,7 @@ accepts a connection, everything behind it can already answer.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Ports are not available: exposing port TCP 0.0.0.0:3000: bind: address already in use` | Something else on the host holds port 3000 | Find it with `ss -tlnp \| grep 3000`, or change the published side only: `ports: ["3000:3000"]` → `["3001:3000"]` in `docker-compose.yml` |
-| `unknown flag: --wait` | Docker Compose older than v2.1 | Upgrade Compose, or run `docker compose up --build -d` and check `docker compose ps` manually |
+| `unknown flag: --wait` or `unknown flag: --wait-timeout` | Docker Compose older than v2.17.0 (`--wait-timeout` on `up` landed in v2.17.0) | Upgrade Compose, or run `docker compose up --build -d` and re-run `docker compose ps` until every service reports `healthy` |
 | `make up` times out waiting for a service | Slow host; the broker is the last to become healthy | Raise `--wait-timeout` (currently 240 s) in the `Makefile`, or check `docker compose logs rabbit-queue` |
 | An app container is restarting with `password authentication failed` | Credentials changed in `.env` but the database container has not restarted | `docker compose up -d --force-recreate inventory-database billing-database`. The entrypoints reconcile roles on every boot, so the container must actually restart |
 | An app container is restarting and the log says `ValueError: invalid literal for int()` | A non-numeric value in a `*_PORT` variable in `.env` | Correct the value; the port falls back to its default and logs a warning for a malformed value, but a non-numeric value is a configuration error worth fixing |
@@ -229,11 +230,16 @@ curl -i -X POST http://localhost:3000/api/movies/ \
 **Expected Response**: `HTTP/1.1 200 OK`
 ```json
 {
-  "id": 1,
-  "title": "A new movie",
-  "description": "Very short description"
+  "description": "Very short description",
+  "id": <id>,
+  "title": "A new movie"
 }
 ```
+
+> Flask serialises JSON with alphabetically sorted keys, so the real body is
+> `{"description": "Very short description", "id": 1, "title": "A new movie"}`.
+> `id` is whatever the sequence returns next; on a freshly initialised volume
+> the first movie is `1`.
 
 #### List All Movies (GET `/api/movies/`)
 ```bash
@@ -244,13 +250,18 @@ curl -i http://localhost:3000/api/movies/
 {
   "movies": [
     {
-      "id": 1,
-      "title": "A new movie",
-      "description": "Very short description"
+      "description": "Very short description",
+      "id": <id>,
+      "title": "A new movie"
     }
   ]
 }
 ```
+
+> Flask serialises JSON with alphabetically sorted keys, so the real body is
+> `{"description": "Very short description", "id": 1, "title": "A new movie"}`.
+> `id` is whatever the sequence returns next; on a freshly initialised volume
+> the first movie is `1`.
 
 #### Filter Movies by Title (GET `/api/movies?title=new`)
 ```bash
@@ -299,11 +310,7 @@ Without `?confirm=all` the gateway returns `400` and nothing is deleted.
 ```bash
 curl -i -X POST http://localhost:3000/api/billing/ \
   -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "20",
-    "number_of_items": "99",
-    "total_amount": "250"
-  }'
+  -d '{"user_id": "20", "number_of_items": "99", "total_amount": "250"}'
 ```
 **Expected Response**: `HTTP/1.1 200 OK`
 ```json
@@ -311,6 +318,10 @@ curl -i -X POST http://localhost:3000/api/billing/ \
   "message": "{\"user_id\": \"20\", \"number_of_items\": \"99\", \"total_amount\": \"250\"} sent"
 }
 ```
+
+> The gateway echoes the request body verbatim, so keep the payload on one line
+> for the response above to match. A pretty-printed body comes back as
+> `"{\n    \"user_id\": \"20\",\n ... } sent"`.
 
 #### Test Outage Resilience (Audit Requirement)
 1. **Stop the `billing-app` container**:
@@ -327,11 +338,7 @@ curl -i -X POST http://localhost:3000/api/billing/ \
    ```bash
    curl -i -X POST http://localhost:3000/api/billing/ \
      -H "Content-Type: application/json" \
-     -d '{
-       "user_id": "22",
-       "number_of_items": "10",
-       "total_amount": "50"
-     }'
+     -d '{"user_id": "22", "number_of_items": "10", "total_amount": "50"}'
    ```
    **Result**: The request returns `HTTP/1.1 200 OK` immediately because the API Gateway safely pushes the message into the durable RabbitMQ broker.
 
@@ -343,7 +350,8 @@ curl -i -X POST http://localhost:3000/api/billing/ \
 5. **Verify order processing**:
    The `billing-app` reconnects, drains the durable message from RabbitMQ, and records the order into `billing-database`.
    ```bash
-   docker exec billing-database psql -U billing_user -d billing_db -c "SELECT * FROM orders;"
+   docker exec billing-database psql -U billing_user -d billing_db -c \
+     "SELECT id, user_id, number_of_items, total_amount FROM orders WHERE user_id = '22';"
    ```
 
    Expected: the order submitted while the worker was down appears in the table.
@@ -354,14 +362,22 @@ curl -i -X POST http://localhost:3000/api/billing/ \
    (1 row)
    ```
 
+   > The order submitted while the worker was down is row 2 — the order from
+   > "Normal State" above is row 1. Note that `orders` also has a `created_at`
+   > column, so `SELECT *` prints five columns.
+
 6. **Watch it happen** (optional but convincing):
    ```bash
    docker logs billing-app --since 60s | grep -E "Connected to RabbitMQ|Successfully processed"
    ```
    ```console
-   [INFO] [billing-app] Connected to RabbitMQ. Waiting for billing messages on 'billing_queue'...
-   [INFO] [billing-app] Successfully processed and recorded order #2 for user '22' (items=10, total=$50.00)
+   2026-10-02 17:05:37,452 [INFO] [billing-app] Connected to RabbitMQ. Waiting for billing messages on 'billing_queue'...
+   2026-10-02 17:05:37,466 [INFO] [billing-app] Successfully processed and recorded order #2 for user '22' (items=10, total=$50.00)
    ```
+
+   > Every line is prefixed with a timestamp (`%(asctime)s`, set in
+   > `srcs/billing-app/app/__init__.py:11`), and the grep also returns pika's own
+   > `AMQPConnectionWorkflow` lines. Order `#2` is what a fresh database returns.
 
 > `docker stop billing-app` exits `0`, not `137`: the service handles `SIGTERM`
 > and drains its AMQP channel, so an unacknowledged message is requeued rather
@@ -410,7 +426,7 @@ This project adopts and improves upon the architecture from `crud-master-py`:
 | **Database Hosts** | Hardcoded `localhost:5432` / local SQLite | Dynamic environment variables (`${INVENTORY_DB_HOST}`, etc.) | Enables container-to-container service discovery across Docker bridge network. |
 | **HTTP Status Code** | POST returned `201 Created` | POST returns `200 OK` | Conforms strictly to audit assertion criteria. |
 | **Restart Policy** | None / Default (`no`) | `restart: on-failure` across all 6 services | Satisfies audit restart policy check `{on-failure 0}`. |
-| **Healthchecks** | None | Healthchecks on all six images, plus health-gated `depends_on` | Prevents startup race conditions; the first request after a cold boot returns `200`. |
+| **Healthchecks** | None | Healthchecks on all six *services* — image-level `HEALTHCHECK` on the four app/broker images, Compose-level `healthcheck:` on the two database images, which need the runtime `${DB_USER}`/`${DB_NAME}` — plus health-gated `depends_on` | Prevents startup race conditions; the first request after a cold boot returns `200`. |
 | **Queue Type Coercion** | Implicit string handling | Explicit, validated coercion in a dependency-free module (`app/validation.py`) | Prevents poison-message spin; the rules are now unit-testable on the host. |
 | **WSGI Server** | Flask development server (`app.run()`) | Waitress | Multi-threaded and production-oriented; the development server is single-threaded and not intended for this. |
 | **Database Binding** | `localhost:5432` hardcoded | Docker-DNS service names from environment variables | Service discovery across the bridge network; recreating a container needs no config change. |
@@ -426,8 +442,8 @@ This section contains thorough answers to all conceptual and architectural quest
 > 
 > **Advantages**:
 > - **Portability**: Runs consistently across development, staging, and production environments ("build once, run anywhere").
-> - **Lightweight & High Efficiency**: Shares the host OS kernel rather than virtualizing hardware, resulting in seconds-fast startup times and minimal CPU/RAM overhead.
-> - **Isolation**: Uses Linux namespaces (PID, NET, MNT, IPC, UTS, USER) and Control Groups (cgroups) to isolate process execution and constrain resource usage.
+> - **Lightweight & High Efficiency**: Shares the host OS kernel rather than virtualizing hardware, resulting in millisecond startup instead of the minutes a VM boot takes, and minimal CPU/RAM overhead.
+> - **Isolation**: Uses Linux namespaces (PID, NET, MNT, IPC, UTS) and Control Groups (cgroups) to isolate process execution and constrain resource usage. A **user** namespace is available but not enabled by default on a stock Docker daemon, which is why the three Python images still drop to a non-root `USER`.
 > - **Immutability & Reproducibility**: Container images are versioned and immutable, eliminating environment drift.
 
 ---
@@ -444,12 +460,12 @@ This section contains thorough answers to all conceptual and architectural quest
 ---
 
 ### Q3: What is Docker and what is it used for?
-> **Answer**: Docker is an open-source platform-as-a-service (PaaS) framework that automates the building, packaging, shipping, and running of applications within lightweight containers. It consists of the Docker Engine daemon (`dockerd`), Docker CLI client, Docker images, and Docker Compose orchestration tools.
+> **Answer**: Docker is an open-source container platform: the Engine (client, daemon, `containerd`, `runc`), a build system for images, a local image store and a registry client. The subject brief describes it as a set of "platform as a service" products; more precisely it is a container runtime and packaging tool — a true PaaS would also own the runtime environment, scaling and routing for you.
 
 ---
 
 ### Q4: What is a microservices architecture and why do we use it?
-> **Answer**: A microservices architecture is a software design pattern where a complex application is structured as a collection of small, loosely coupled, independently deployable services. Each service handles a distinct business domain (e.g., Catalogue/Inventory, Billing/Orders, API Gateway), owns its private database, and communicates via well-defined protocols (HTTP REST, AMQP).
+> **Answer**: A microservices architecture is a software design pattern where a complex application is structured as a collection of small, loosely coupled, independently deployable services. Each service handles a distinct business domain (Catalogue/Inventory, Billing/Orders, API Gateway) and communicates via well-defined protocols (HTTP REST, AMQP). In this stack the two domain services each own their own database — `inventory-app` owns `inventory-database` and `billing-app` owns `billing-database`, two completely separate PostgreSQL clusters that cannot see each other — while `api-gateway-app` is a stateless edge service that owns no database and exists to be the single public entry point.
 >
 > **Why we use it**:
 > - **Independent Scalability**: High-traffic services can be scaled horizontally without scaling the entire application.

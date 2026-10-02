@@ -240,14 +240,20 @@ and its resource use is bounded by control groups."*
 
 Then contrast with VMs, which is the follow-up question.
 
-**Direct answer (containers vs VMs):** *"A VM virtualises hardware: a hypervisor
-emulates the CPU, memory and devices, and each VM boots its own complete guest
-operating system with its own kernel. A container virtualises the operating
-system instead: it is process-level isolation provided by the host kernel, and
-all containers on a host share that one kernel. So a VM costs gigabytes and
-minutes to start; a container costs megabytes and milliseconds, at the price of
-weaker isolation — a kernel bug or a hostile syscall affects every container on
-that host."*
+**Direct answer (containers vs VMs):** *"A VM virtualises the whole machine: a
+hypervisor — almost always using hardware-assisted virtualisation, VT-x/AMD-V —
+presents each VM with its own virtual CPU, memory and devices, and the VM boots
+a complete guest operating system with **its own kernel**. It is not literally
+emulation: with VT-x the guest's ordinary instructions run natively on the
+physical CPU and the hypervisor only traps privileged instructions and page
+faults, with memory mapped by second-level paging. A container virtualises the
+operating system instead: it is process-level isolation provided by the host
+kernel, and all containers on a host share that one kernel. So a VM costs
+gigabytes and minutes to start; a container costs megabytes and milliseconds,
+at the price of weaker isolation — a kernel bug or a hostile syscall affects
+every container on that host. That shared kernel is also why a container cannot
+run a different kernel than its host, and why a kernel panic affects every
+container on that host."*
 
 | Dimension | Virtual machine | Container |
 |---|---|---|
@@ -292,11 +298,16 @@ question:
 > control what a process can *see*: its own PID namespace so it is PID 1 and
 > cannot see host processes; its own mount namespace so it only sees its own
 > filesystem; its own network namespace so it has a private `eth0` and loopback;
-> and separate UTS, IPC and user namespaces. **Control groups** control what a
-> process can *use*: a memory ceiling enforced by the kernel OOM killer, a CPU
-> weight and quota, a cap on the number of processes, and block-I/O throttling.
-> Containers get their isolation from the same kernel the host runs, which is
-> both their efficiency and their weaker security boundary compared to a VM."*
+> and separate UTS and IPC namespaces. A **user** namespace is available but is
+> **not** enabled by default, so the container's root is still the host's root —
+> which is exactly why we drop to a non-root `USER` in our images. **Control
+> groups** control what a process can *use*: a memory ceiling enforced by the
+> kernel OOM killer, a CPU weight and quota, a cap on the number of processes,
+> and block-I/O throttling. Containers get their isolation from the same kernel
+> the host runs, which is both their efficiency and their weaker security
+> boundary compared to a VM. A container therefore cannot run a different
+> kernel than the host, and a kernel panic takes every container on that host
+> with it."*
 
 **Verify**
 
@@ -323,7 +334,7 @@ own files use:
 | Instruction | Creates a layer? | What it does | Where we use it |
 |---|---|---|---|
 | `FROM` | Yes (base) | Selects the parent image. | `FROM alpine:3.23` in all six. |
-| `WORKDIR` | Directory only | Sets the working directory for later instructions. | `/usr/src/app` in the three apps, `/` elsewhere. |
+| `WORKDIR` | Zero-content entry | Sets the working directory for later `RUN`, `COPY`, `CMD` and for the container at run time; it creates the directory. | `/usr/src/app` in the three Python images. The two database images and the broker image set none, so they run from `/`. |
 | `ENV` | Metadata | Sets an environment variable available at build *and* run time. | `PYTHONUNBUFFERED=1`, `PGDATA`, `PATH`. |
 | `RUN` | **Yes** | Runs a shell command in a temporary container and commits the filesystem change. | `apk add`, `pip install`, `adduser`, `mkdir /usr/src/logs`, build-time import smoke tests. |
 | `COPY` | **Yes** | Copies files from the build context into the image. | `COPY server.py`, `COPY app/ ./app/`, `COPY --chmod=0755 entrypoint.sh ...`. |
@@ -331,19 +342,28 @@ own files use:
 | `EXPOSE` | Metadata | Documents the port the service listens on. **It does not open a host port.** | `5432`, `8080`, `5672 15672`, `3000`. |
 | `STOPSIGNAL` | Metadata | The signal Docker sends on `docker stop`. | `STOPSIGNAL SIGINT` on both database images (see 10.2). |
 | `HEALTHCHECK` | Metadata | A periodic probe run by the daemon. | In all three app images and the broker image. |
-| `CMD` | Metadata | The default command, in **exec form**. | `CMD ["python3", "server.py"]`. |
+| `CMD` | Metadata | The default command, in **exec form**. | `CMD ["python3", "server.py"]` in the three Python images. The two database images and the broker image have no `CMD`; they use `ENTRYPOINT` alone. |
 | `ENTRYPOINT` | Metadata | The fixed entrypoint, in exec form. | `ENTRYPOINT ["/usr/local/bin/init-db.sh"]`, `["/usr/local/bin/entrypoint.sh"]`. |
 
 **Points to have ready, because they are the questions that follow:**
 
+- *What about `ARG`, `LABEL`, `ADD`, `ONBUILD`, `SHELL` and `VOLUME`?* We use
+  none of them. `ARG` is build-time only and is not persisted into the image
+  config (you `ENV` it to keep it); `LABEL` and `ONBUILD` are metadata, `ONBUILD`
+  firing instructions in a child build; `SHELL` sets the default shell for
+  shell-form `RUN`/`CMD`/`ENTRYPOINT`; `ADD` is `COPY` plus URL fetching plus
+  automatic local-tar extraction, so we prefer `COPY`; `VOLUME` is covered below.
 - *Why exec form (`CMD ["python3", "server.py"]`) rather than shell form?* Inside a
   container the app runs as PID 1, and the kernel does not apply default signal
   dispositions for unhandled terminating signals to a PID-namespace init
   process. With shell form, `/bin/sh -c` becomes PID 1 and never forwards
   `SIGTERM`, so `docker stop` waits out its grace period and the daemon has to
-  `SIGKILL`. Exec form hands PID 1 to Python itself, which handles `SIGTERM`.
-  This is not theoretical for us: it is why `billing-app` exits **0** on
-  `docker stop` instead of 137 — we verify that in `make test`.
+  `SIGKILL`. Exec form is what lets the signal reach Python as PID 1 —
+  necessary, but not on its own sufficient. What actually produces the exit code
+  is `srcs/billing-app/server.py`, which installs SIGTERM/SIGINT handlers,
+  closes the socket, signals the consumer and joins with a timeout, so
+  `docker stop billing-app` exits **0** instead of 137 — we verify that in
+  `make test`. Receiving the signal is not the same as honouring it.
 - *Why is there no `HEALTHCHECK` in the database images?* The probe needs
   `${DB_USER}` and `${DB_NAME}`, which are only known at run time. Declaring the
   healthcheck in `docker-compose.yml` lets the probe use the container's own
@@ -465,9 +485,11 @@ Compose's default project prefix would not have matched."*
 **Direct answer:** *"A Docker network is a virtual network that gives containers
 private IP addresses and lets them reach each other by name. We use a
 user-defined bridge because it provides two things the default bridge does not:
-embedded DNS, so `inventory-app` resolves to a container IP instead of a
-hardcoded address, and isolation, so services on it are reachable from other
-containers but not from outside the host unless a port is explicitly published."*
+first, **embedded DNS**, so `inventory-app` resolves to a container IP instead
+of a hardcoded address; and second, **network-scoped membership**: a container
+can be attached to several networks at once and only talks to peers on the
+networks it is attached to, which is how you separate groups of containers that
+need full mutual access from groups that must not see each other."*
 
 **Say this about DNS:** *"On a user-defined bridge, Docker runs an embedded
 resolver at `127.0.0.11`. `api-gateway-app` addresses the inventory service as
@@ -480,6 +502,13 @@ port on the host by installing DNAT rules in `iptables`. `expose:` is metadata
 only — it documents the intended port and populates the image metadata, but
 creates no host rule at all. Our five internal services use `expose:`; only the
 gateway uses `ports: 3000:3000`."*
+
+- *Are the internal services reachable from the Docker host itself?* Yes — on the
+  container's bridge IP. The accurate claim is about the perimeter: un-published
+  ports are blocked from outside the host, but they stay open to other containers
+  on the same network **and to the host itself**. That is why the audit question
+  is about what is exposed outside the Docker host, and why `docker compose ps`
+  and `docker port` are the evidence.
 
 Verify:
 
@@ -503,10 +532,17 @@ needed."*
 **Direct answer (why images):** *"An image gives us four things: reproducibility,
 because the entire dependency tree is frozen into content-addressed layers;
 distribution, because an image is a single artifact that moves between machines;
-immutability with rollback, because a tagged image cannot change, so a bad
-release is a matter of re-running an older tag; and efficiency, because layers
-are shared between images and cached on each host, so six images over a common
-Alpine base do not cost six copies of the base."*
+**Immutability, and therefore rollback** — the *image* cannot change after it is
+built; it is identified by its `sha256:` digest and its chain of layer IDs. A
+**tag is only a mutable label** pointing at one and can be re-pointed at any
+time, so the immutable thing to pin is the digest. Rollback therefore means
+re-running an older *digest* — or, in this project, checking out the previous
+Dockerfile and rebuilding, because we build locally from `srcs/**/Dockerfile`
+rather than pulling from a registry. Because a container is disposable, rollback
+is just running the previous immutable artefact again.
+
+The fourth is efficiency, because layers are shared between images and cached on each
+host, so six images over a common Alpine base do not cost six copies of the base."*
 
 **Verify — the image layer cache is visible:**
 
@@ -627,6 +663,12 @@ inventory-database   inventory-database   "/usr/local/bin/init…"   inventory-d
 rabbit-queue         rabbit-queue         "/usr/local/bin/entr…"   rabbit-queue         1 minute ago     Up 1 minute (healthy)      5672/tcp, 15672/tcp
 ```
 
+> **Docker 29+ caveat:** with the containerd image store, `docker ps` and
+> `docker compose ps` render the IMAGE column as an image ID / `sha256:…` for
+> locally built images instead of the repository name. The names are still
+> correct — verify them with `docker inspect -f '{{.Config.Image}}' <container>`,
+> which is the check that matters for the audit.
+
 **Direct answer:** *"Yes. All six services build and start, and every container
 reaches the healthy state. The order is not arbitrary: Compose starts the two
 databases and the broker, waits for their healthchecks, then starts the two
@@ -695,12 +737,31 @@ does not fight the restart policy."*
 **Prove it rather than claiming it** — this is a strong moment in an audit:
 
 ```bash
-docker kill --signal=KILL inventory-app      # simulates a crash: non-zero exit
+# `docker kill` is a MANUAL stop: Docker suppresses the restart policy for it,
+# so it proves nothing. Prove the policy semantics with a throwaway probe that
+# really crashes, and separately assert the configured policy on our containers.
+docker run -d --name restart-probe --restart=on-failure alpine:3.23 sh -c 'exit 1'
 sleep 8
-docker inspect -f 'running={{.State.Running}} restarts={{.RestartCount}}' inventory-app
+docker inspect -f 'running={{.State.Running}} restarts={{.RestartCount}}' restart-probe
+docker rm -f restart-probe
 ```
 
-Expect `restarts` to have incremented and the container to be running again.
+Expected (verified):
+
+```console
+running=true restarts=6
+```
+
+`restarts` climbing proves `on-failure` fires on a genuine non-zero exit. Then
+confirm our own containers carry the policy:
+
+```bash
+docker inspect -f '{{.HostConfig.RestartPolicy}}' inventory-app   # {on-failure 0}
+```
+
+> Do **not** try this with `docker kill -s KILL inventory-app`. Docker treats
+> `docker kill` as a *manual stop*, so it suppresses the restart policy and the
+> container stays down with `restarts=0` — it is not evidence of anything.
 
 **Be ready to explain the graceful-shutdown work.** `docker stop` should exit 0,
 not 137:
@@ -794,13 +855,19 @@ printf '%-20s %s\n' api-gateway-app "$(docker port api-gateway-app)"
 ```
 
 ```console
-inventory-database  no published port
-billing-database    no published port
-inventory-app       no published port
-billing-app         no published port
-rabbit-queue        no published port
-api-gateway-app     3000/tcp -> 0.0.0.0:3000
+inventory-database
+billing-database
+inventory-app
+billing-app
+rabbit-queue
+api-gateway-app      3000/tcp -> 0.0.0.0:3000
+3000/tcp -> [::]:3000
 ```
+
+> The five internal services print **blank lines**, not `no published port`:
+> `docker port` exits 0 with empty output when nothing is published, so the `||`
+> fallback in the loop above never fires. A blank line *is* the pass condition.
+> The gateway prints two lines because Docker publishes both IPv4 and IPv6.
 
 **Direct answer:** *"Yes. Only `api-gateway-app` has a `ports:` mapping, and it is
 the only container the daemon publishes on the host. The other five use `expose:`,
@@ -832,16 +899,15 @@ docker exec inventory-database sh -c 'echo "user=$DB_USER db=$DB_NAME"'
 # user=inventory_user db=inventory_db
 
 # The app fails closed rather than defaulting
-docker exec api-gateway-app python3 -c "
-import os
-os.environ.pop('RABBITMQ_PASSWORD', None)
-from app.queue_sender import _require_env
-try:
-    _require_env('RABBITMQ_PASSWORD')
-except RuntimeError as e:
-    print('fails closed:', e)
-"
-# fails closed: Missing required secret environment variable: RABBITMQ_PASSWORD
+# The secret is required at IMPORT time, so importing the module with the
+# variable removed is itself the proof that there is no hardcoded fallback.
+docker exec -e RABBITMQ_PASSWORD= api-gateway-app python3 -c "import app.queue_sender"
+```
+
+Expected: a non-zero exit and a traceback ending in
+
+```text
+RuntimeError: Missing required secret environment variable: RABBITMQ_PASSWORD
 ```
 
 **Direct answer:** *"Secrets exist at runtime in the container environment and
@@ -959,6 +1025,11 @@ docker exec billing-database psql -U billing_user -d billing_db -c \
 (1 row)
 ```
 
+> On a fresh database this is row `1`. On a database that has already served audit
+> runs the ids keep climbing, so match on `user_id`/`total_amount` rather than on
+> `id`. Use `WHERE user_id = '20'` if you want the demonstration to be
+> deterministic.
+
 **Explain the string coercion** if asked why the audit posts numbers as strings:
 
 > *"The audit payload sends `number_of_items` and `total_amount` as JSON
@@ -1048,9 +1119,14 @@ docker logs billing-app --since 60s 2>&1 | grep -E "Connected to RabbitMQ|Succes
 ```
 
 ```console
-[INFO] [billing-app] Connected to RabbitMQ. Waiting for billing messages on 'billing_queue'...
-[INFO] [billing-app] Successfully processed and recorded order #2 for user '22' (items=10, total=$50.00)
+2026-10-02 17:04:10,658 [INFO] [billing-app] Connected to RabbitMQ. Waiting for billing messages on 'billing_queue'...
+2026-10-02 17:04:10,670 [INFO] [billing-app] Successfully processed and recorded order #2 for user '22' (items=10, total=$50.00)
 ```
+
+> Every line is prefixed with a timestamp (`%(asctime)s`, set in
+> `srcs/billing-app/app/__init__.py:11`), and the grep also returns pika's own
+> `AMQPConnectionWorkflow` lines. Order `#2` is what you see on a fresh database;
+> a higher number just means earlier orders exist.
 
 ---
 
@@ -1184,7 +1260,7 @@ Have a short, specific answer ready rather than a claim:
 | Start the stack | `make up` | all six healthy |
 | Container status | `docker compose ps` | six `Up (healthy)` |
 | Restart policy | `docker inspect -f '{{.HostConfig.RestartPolicy}}' <c>` | `{on-failure 0}` ×6 |
-| Restart actually works | `docker kill -s KILL inventory-app; sleep 8` | `RestartCount` increments |
+| Restart actually works | `docker run -d --name restart-probe --restart=on-failure alpine:3.23 sh -c 'exit 1'; sleep 8` | `restarts` climbs (not `docker kill`: that is a manual stop) |
 | Graceful stop | `docker stop billing-app` | exit `0` |
 | Images | `docker inspect -f '{{.Config.Image}}' <c>` | name equals service name |
 | Image history | `docker history api-gateway-app` | all `apk`/`pip`, no Hub service image |

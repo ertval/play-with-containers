@@ -189,7 +189,7 @@ single bridge network `play-with-containers-network`; only `3000:3000` published
 **Yes.** Run it live:
 
 ```bash
-make up        # = docker compose up --build -d --wait --wait-timeout 120
+make up        # = docker compose up --build -d --wait --wait-timeout 240
 docker compose ps
 ```
 
@@ -212,15 +212,22 @@ one in this stack (see §10).
 
 A design pattern structuring an application as a collection of small, loosely coupled,
 independently deployable services. Each service handles one business domain (inventory,
-billing, gateway), owns its private database, and communicates via well-defined protocols
-(HTTP REST, AMQP).
+billing, gateway) and communicates via well-defined protocols (HTTP REST, AMQP). In this
+stack the two domain services each own their own database — `inventory-app` owns
+`inventory-database`, `billing-app` owns `billing-database`, two completely separate
+PostgreSQL clusters — while `api-gateway-app` is a stateless edge service that owns no
+database and is the single public entry point.
 
 ### "Why do we use microservices architecture?"
 
 - Independent scalability — scale one service without scaling everything.
 - Fault isolation — a `billing-app` crash doesn't take down `inventory-app`.
-- Independent deployment and polyglot tech stacks.
+- Independent deployment and evolvability.
 - Faster, low-risk delivery for distributed teams.
+
+One honest caveat: polyglot persistence is a capability of the pattern, not something this
+build exercises — all three services are Python 3.12 with Flask and Waitress, and both
+domain services speak PostgreSQL.
 
 ### "What is a queue and what is it used for?"
 
@@ -521,9 +528,15 @@ docker inspect -f '{{.State.Running}}' billing-app   # → false
 3. On `docker start billing-app`, the consumer reconnects (retry loop, heartbeats) and receives
    the buffered message. Delivery uses `auto_ack=False` + manual acknowledgements: the order is
    inserted into `billing-database` and **only then** acked on success. A failed insert is
-   `basic_nack(requeue=True)`d with a bounded redelivery counter, so the broker redelivers
-   rather than discarding; once the counter is exhausted the message is routed to a
-   dead-letter queue for inspection instead of vanishing.
+   retried a bounded number of times (5 attempts, 1 s apart) and then
+   `basic_nack(requeue=True)`d, which returns the message to the head of the queue — so the
+   broker redelivers rather than discarding. **There is no dead-letter queue in this build**:
+   `queue_declare(queue=..., durable=True)` declares no `x-dead-letter-exchange` /
+   `x-dead-letter-routing-key`, and the nack carries no redelivery counter, so the same message
+   will be handed out again and the cycle repeats. Name that limitation out loud rather than
+   claiming a DLQ that does not exist. If I added one, I would declare
+   `x-dead-letter-exchange`/`x-dead-letter-routing-key` on the queue and cap redelivery by
+   counting the `x-death` headers RabbitMQ attaches to a dead-lettered message.
 
 **Prove persistence:**
 
@@ -550,8 +563,10 @@ docker exec billing-database psql -U billing_user -d billing_db \
   the penultimate stable Alpine release (no floating `latest`), a single published port with
   the rest of the stack internal to one user-defined bridge, network isolation and port
   publishing asserted by an automated test suite, at-least-once queue buffering demonstrated
-  live (ack-only-on-success, nack-and-requeue with a bounded redelivery counter, and a
-  dead-letter queue as the terminal backstop — no silent loss), structured dual-stream logging
+  live (ack-only-on-success, and nack-and-requeue so a failed insert cycles back through the
+  queue instead of vanishing — bounded retries inside one delivery, then requeue; there is no
+  DLQ in this build, and that requeue loop is the limitation to name out loud rather than a
+  dead-letter queue as a terminal backstop), structured dual-stream logging
   (stdout + a rotating file on a named volume), and complete docs (README + ADR + this audit
   guide + theory guide).
 
@@ -570,7 +585,7 @@ Beyond the checklist, be ready for these natural follow-ups:
 | What does `service_healthy` mean? | Compose waits until the dependency's HEALTHCHECK passes — unlike `service_started` (process merely launched). DBs gate the apps; the broker uses `service_started` + in-app retries. |
 | Does `unhealthy` restart a container? | No — restart policies trigger on exit status only; unhealthy is used for `depends_on` gating and diagnostics. |
 | Why `prefetch_count=1`? | Fair dispatch: the consumer holds one unacked message at a time; combining with manual acks means a crashed worker re-delivers, never loses work. |
-| What if a message is malformed? | It's a poison-message risk: an unparseable or invalid payload is nacked with requeue off, so RabbitMQ dead-letters it instead of the message cycling forever and blocking the queue behind it (head-of-line blocking). Payload-shape failures are therefore never silently dropped — they end up inspectable in the DLQ. |
+| What if a message is malformed? | It is **acknowledged and discarded** — `basic_ack`, not nacked and not dead-lettered. A poison message can never be retried into success, and requeueing it would cycle it forever and block the queue behind it (head-of-line blocking), so discarding is the correct call. This path is therefore **at-most-once by design**, and a payload of that shape never reaches the database. If I wanted such messages inspectable I would route them to a DLQ instead of dropping them. |
 | How is `pg_isready` different from a real login? | It only reports whether the server is accepting connections on that socket; it does **not** authenticate. Prove it: `docker exec inventory-database pg_isready -U bogus_user -d bogus_db -h 127.0.0.1; echo $?` prints `accepting connections` and returns `0` even with a non-existent user and database. So our DB healthchecks assert *readiness*, and real authentication (SCRAM-SHA-256, per `pg_hba.conf`) is what protects the data. |
 | How would you scale billing? | Run N `billing-app` replicas on the same queue — RabbitMQ fair-dispatches (prefetch=1). State is in PostgreSQL, workers are stateless. |
 | Where do credentials live at runtime? | Only in `.env` → Compose interpolation → container environment variables. Never baked into images. |
