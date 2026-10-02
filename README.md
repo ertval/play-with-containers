@@ -417,7 +417,7 @@ This project adopts and improves upon the architecture from `crud-master-py`:
 
 ---
 
-## 9. Appendix: Theoretical & Oral Exam Study Guide
+## 9. Appendix: Theoretical Study Guide
 
 This section contains thorough answers to all conceptual and architectural questions listed in the audit guide:
 
@@ -517,11 +517,3 @@ This section contains thorough answers to all conceptual and architectural quest
 > - It ensures complete reproducibility across development, testing, CI/CD, and production.
 
 ---
-
-## 10. Further Documentation
-
-| Document | Contents |
-|---|---|
-| [`docs/requirements/readme.md`](docs/requirements/readme.md) | The project brief: objectives, required architecture and constraints |
-| [`docs/requirements/audit.md`](docs/requirements/audit.md) | The audit checklist this project is graded against |
-| [`docs/requirements/AUDIT_GUIDE.md`](docs/requirements/AUDIT_GUIDE.md) | Audit defense manual: every checklist item and oral question, with verification commands and expected output |
