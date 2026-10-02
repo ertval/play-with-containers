@@ -54,9 +54,8 @@ def _sanitise_subpath(subpath: str) -> str | None:
 def _forward(method, target_url, headers, body, query):
     """Issue the upstream call with bounded retries on transient failures.
 
-    The gateway starts as soon as `inventory-app` is merely *started*, so a cold
-    boot leaves a short window where the upstream socket is not yet accepting.
-    Retrying turns that race into a slower success instead of a 502.
+    Retries are safe for idempotent methods or on early connection establishment
+    failures before data has been read by upstream.
     """
     last_error = None
     for attempt in range(1, UPSTREAM_ATTEMPTS + 1):
@@ -75,6 +74,11 @@ def _forward(method, target_url, headers, body, query):
             logger.warning(
                 f"Upstream attempt {attempt}/{UPSTREAM_ATTEMPTS} to {target_url} failed: {e}"
             )
+            # Only retry connection errors or idempotent methods (do not retry read timeouts on POST)
+            is_idempotent = method.upper() in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
+            is_conn_error = isinstance(e, requests.exceptions.ConnectionError)
+            if not is_idempotent and not is_conn_error:
+                break
             if attempt < UPSTREAM_ATTEMPTS:
                 time.sleep(attempt)
     raise last_error

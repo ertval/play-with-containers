@@ -54,7 +54,7 @@ config:
 
 lint:
 	@if command -v hadolint >/dev/null 2>&1; then \
-		hadolint srcs/**/Dockerfile; \
+		hadolint srcs/*/Dockerfile; \
 	elif command -v docker >/dev/null 2>&1; then \
 		for df in srcs/*/Dockerfile; do \
 			echo "Linting $$df..."; \

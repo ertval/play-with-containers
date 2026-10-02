@@ -245,8 +245,14 @@ accepting work, finish/drain in-flight work, persist state, exit 0.
 | MNT | mount points / filesystem view |
 | UTS | hostname |
 | IPC | System V / POSIX shared memory, semaphores |
-| USER | UID/GID mappings (root inside ≠ root outside) |
+| USER | UID/GID mappings (root inside ≠ root outside) — **only with user-namespace remapping enabled** (see below) |
 | CGROUP | cgroup root view |
+
+> **USER namespace caveat**: Docker supports the namespace but does **not** enable remapping
+> by default — out of the box the container's `root` is the host's `root` (same UID 0), so
+> "root inside ≠ root outside" is only true once you opt in via `--userns-remap` (daemon-level)
+> or `--userns=host`/`--userns=keep-id` at run time. This is why dropping privileges with a
+> non-root `USER` in the Dockerfile matters on a default daemon.
 
 ### cgroups — the "what you can use"
 
@@ -314,9 +320,11 @@ networks are user-defined.
 
 ### Security consequence
 
-Un-published ports are unreachable from outside the Docker host **even though the container
-port is open**. Perimeter control = publish as little as possible: one ingress (a gateway),
-everything else internal.
+Un-published ports are not reachable **from outside the Docker host** **even though the
+container port is open**. (Precisely: publishing is what exposes a port off the host — an
+un-published port remains open on the bridge subnet and reachable *by container IP from the
+Docker host itself*.) Perimeter control = publish as little as possible: one ingress (a
+gateway), everything else internal.
 
 ---
 

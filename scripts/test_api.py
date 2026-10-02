@@ -125,6 +125,7 @@ class TestPayloadValidation(unittest.TestCase):
 
     def test_billing_type_coercion(self):
         """Verify explicit coercion of string-formatted numbers from audit payloads."""
+        from decimal import Decimal
         user_id, number_of_items, total_amount = coerce_order_payload({
             "user_id": "20",
             "number_of_items": "99",
@@ -133,9 +134,9 @@ class TestPayloadValidation(unittest.TestCase):
 
         self.assertEqual(user_id, "20")
         self.assertEqual(number_of_items, 99)
-        self.assertEqual(total_amount, 250.0)
+        self.assertEqual(total_amount, Decimal("250"))
         self.assertIsInstance(number_of_items, int)
-        self.assertIsInstance(total_amount, float)
+        self.assertIsInstance(total_amount, Decimal)
 
     def test_billing_coercion_invalid_values(self):
         """Verify that malformed payloads raise InvalidOrderError, not crash the worker."""

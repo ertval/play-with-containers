@@ -42,8 +42,15 @@ Run through this **before** the audit starts:
 - [ ] `.env.example` present; `.gitignore` contains `.env`.
 - [ ] Repo contains: `README.md`, `docker-compose.yml`, `Makefile`, `srcs/` with one
       Dockerfile per service, `openapi.yaml`, `postman/`, `scripts/`, `docs/`.
-- [ ] `grep -ri --exclude-dir=.git -E 'password|secret' .` → only `.env.example` placeholders
-      and documentation references, never real credentials.
+- [ ] No tracked file contains a credential literal. `.env.example` is the only tracked file
+      that shows password *placeholders* (`inventory_secret_pass` and friends — deliberately
+      non-production values); the real `.env` is git-ignored and untracked, so no grep over
+      the working tree should be quoted as the proof. Verify against tracked files only:
+
+      ```bash
+      git grep -nE '(inventory|billing|rabbit)_secret_pass' -- . ':!.env.example'   # → no output
+      git ls-files | grep -c '^\.env$'                                            # → 0
+      ```
 - [ ] `docker compose down -v --remove-orphans` then `make up` — cold boot from scratch works.
 - [ ] `make test` (audit suite `scripts/test_audit.sh`) passes end-to-end.
 - [ ] Postman collection imports and runs (`postman/play-with-containers.postman_collection.json`).
@@ -140,8 +147,13 @@ environments once, then run them identically anywhere.
 **Yes.** Walk the auditor through the section map:
 
 - §3 Prerequisites (OS, Docker 24+, Compose v2, Make + curl)
-- §4 Configuration — full `.env` variable reference and `cp .env.example .env` setup
-- §5 Usage & Management — every `make` target, plus raw `docker compose` equivalents
+- §4 Configuration — a table covering every variable in `.env.example`, plus the
+  `cp .env.example .env` setup step. The password column repeats the non-production
+  placeholders from `.env.example` (`inventory_secret_pass` and the two siblings) and
+  the following note says to replace them before any real deployment.
+- §5 Usage & Management — every `make` target (`help`, `up`, `build`, `ps`, `logs`, `restart`,
+  `down`, `clean`, `rebuild`, `test`, `test-py`, `config`, `lint`), plus raw `docker compose`
+  equivalents
 - §6 API Walkthrough — every endpoint with `curl` examples and expected responses
 - §1/§2 Architecture & design decisions
 - §7 Architectural Decision Records with audit justifications
@@ -177,7 +189,7 @@ single bridge network `play-with-containers-network`; only `3000:3000` published
 **Yes.** Run it live:
 
 ```bash
-make up        # = docker compose up --build -d
+make up        # = docker compose up --build -d --wait --wait-timeout 120
 docker compose ps
 ```
 
@@ -186,8 +198,11 @@ All six containers start: `inventory-database`, `billing-database`, `inventory-a
 
 **Why cold boot never deadlocks** (likely follow-up): databases run `pg_isready`
 healthchecks; apps use two-tier dependencies — `service_healthy` on databases, plus
-in-application exponential retry loops toward the broker — so slow first-time volume
-initialization never causes Compose startup failures.
+in-application fixed-interval retry loops (30 attempts × 2 s toward the database, 5 × 1 s
+publish attempts in the gateway, a 3 s reconnect loop in the billing consumer) — so slow
+first-time volume initialization never causes Compose startup failures. The waits are
+constant, not exponentially backed off: Docker's own restart backoff is the only exponential
+one in this stack (see §10).
 
 ---
 
@@ -264,8 +279,8 @@ Explain on the live `srcs/api-gateway-app/Dockerfile`:
 | `RUN python3 -c "import flask, ..."` | Build-time smoke test — image build fails fast on broken deps. |
 | `RUN mkdir -p /usr/src/logs` | Mount point for the named log volume. |
 | `EXPOSE 3000` | Documentation of the listening port (publishing happens in compose `ports:`). |
-| `HEALTHCHECK ... CMD python3 -c "urlopen('/health')"` | Daemon probes `/health`; `start-period` covers boot; used by `service_healthy` gating. |
-| `CMD ["python3", "server.py"]` | Exec form → Python is PID 1 and receives SIGTERM directly on `docker stop`. |
+| `HEALTHCHECK ... CMD python3 -c "urlopen('/health')"` | Daemon probes `/health`; `start-period` covers boot. Drives the `(healthy)` marker in `docker ps` only — the `service_healthy` gating uses the Compose-level DB probes (see §10). |
+| `CMD ["python3", "server.py"]` | Exec form → Python *is* PID 1 and SIGTERM from `docker stop` is delivered to it directly. Receiving it is not the same as honouring it — PID 1's default disposition ignores signals that would kill a normal process, so with no handler installed the daemon escalates to SIGKILL. Full mechanism stated once in §17. |
 
 > ✔ "Did the student reply correctly to all the above questions?"
 
@@ -297,8 +312,8 @@ Explain on the live `srcs/api-gateway-app/Dockerfile`:
 - **billing-app** — worker consuming billing messages from the RabbitMQ queue and writing
   orders into billing-database, port 8080 internal.
 - **rabbit-queue** — RabbitMQ server holding the durable `billing_queue`.
-- **api-gateway-app** — reverse proxy forwarding `/api/inventory` to inventory-app and
-  publishing billing messages to RabbitMQ; the only host-exposed service, port 3000.
+- **api-gateway-app** — reverse proxy forwarding `/api/movies` to inventory-app and
+  publishing billing messages to RabbitMQ; the only published service, port 3000.
 
 > **Wording note**: the audit text says "Node.js server". Our servers are Python/Flask — the
 > subject's functional requirements (a server with those ports and behaviors) are met;
@@ -319,11 +334,16 @@ done
 
 **Yes** — every service sets `restart: on-failure` in `docker-compose.yml`, inspecting
 verbatim as `{on-failure 0}`: restart automatically on any non-zero exit, unlimited retries
-(`0` = no maximum), exponential backoff between attempts.
+(`0` = no maximum). The delay between Docker's own restart attempts *is* exponential (the
+daemon backs off, capped around a minute); our applications' in-process retry loops are
+constant-interval, not exponential (§6).
 
-**Why `on-failure`** (follow-up): a clean `docker stop` (exit 0) should *not* be fought by
-the daemon; only genuine failures (crashes, OOM) trigger recovery. That's the difference
-from `always`/`unless-stopped`, which also restart cleanly-exited containers.
+**Why `on-failure`** (follow-up): the trigger is the **exit status**, not intent. A clean
+shutdown exits `0`, which `on-failure` does not treat as a failure, so the daemon leaves the
+container stopped; only genuine failures (crashes, OOM, non-zero exits) are restarted.
+That's the difference from `always`/`unless-stopped`, which restart cleanly-exited
+containers too. (`always` and `unless-stopped` additionally distinguish a manually stopped
+container, which is a separate mechanism from the exit-code test.)
 
 ---
 
@@ -332,19 +352,29 @@ from `always`/`unless-stopped`, which also restart cleanly-exited containers.
 ```bash
 docker volume ls
 # DRIVER    VOLUME NAME
-# local     inventory-database
-# local     billing-database
-# local     api-gateway-app
+# local     inventory-database      ← this project
+# local     billing-database        ← this project
+# local     api-gateway-app         ← this project
+# local     <others>                 ← unrelated projects on the same host
 ```
 
 ### "Do all volumes have the correct configuration?"
 
-**Yes** — three named volumes, exact bare names (Compose `name:` overrides suppress the
-project prefix):
+**Yes** — the three volumes `audit.md` requires are present, under their exact bare names
+(Compose `name:` overrides suppress the project prefix):
 
 - `inventory-database` → mounted at `/var/lib/postgresql/data` (inventory catalogue data)
 - `billing-database` → mounted at `/var/lib/postgresql/data` (billing orders data)
 - `api-gateway-app` → mounted at `/usr/src/logs` (rotating `gateway.log`)
+
+`rabbit-queue` has no volume. Queue durability for the audit outage comes from a durable
+queue and persistent messages on the running broker, not from a named volume. Removing the
+broker container discards that node state.
+
+`docker volume ls` lists **every** volume on the host, including ones from unrelated
+projects; to show only this stack's, filter by name (`docker volume ls | grep -E
+'inventory-database|billing-database|api-gateway-app'`) or scope the evidence to
+the project prefix-free names above.
 
 ### "What is a Docker volume?"
 
@@ -376,8 +406,12 @@ curl -s http://localhost:3000/health            # → reachable
 curl -s --connect-timeout 2 http://localhost:5432  # → connection refused (as expected)
 ```
 
-All internal services use `expose:` (documentation) and are reachable **only** over the
-internal bridge network `play-with-containers-network`.
+All internal services use `expose:` (documentation) and are **not published on the host
+interface**; container-to-container traffic uses the internal bridge network
+`play-with-containers-network`. (Precisely: publishing is what makes a port reachable off the
+Docker host — an un-published port is still open on the bridge subnet and reachable *by
+container IP from the Docker host itself*. That is exactly why the audit's requirement is
+that only the gateway is *published*.)
 
 ### "What is the Docker network?"
 
@@ -389,8 +423,8 @@ each other by service name.
 
 - **Service discovery** — `http://inventory-app:8080`, `inventory-database:5432`,
   `rabbit-queue:5672` — names, never dynamic IPs.
-- **Isolation & perimeter security** — nothing is host-reachable unless published via
-  `ports:`; the gateway is the single entry point.
+- **Isolation & perimeter security** — nothing is reachable *off* the host unless published
+  via `ports:`; the gateway is the single entry point.
 
 > ✔ "Did the student reply correctly to all the above questions?"
 
@@ -484,9 +518,12 @@ docker inspect -f '{{.State.Running}}' billing-app   # → false
    and returns 200. **It never writes to the billing DB itself.**
 2. RabbitMQ buffers the message on the broker while no consumer is connected — nothing is
    lost.
-3. On `docker start billing-app`, the consumer reconnects (retry loop, heartbeats), receives
-   the buffered message, and — because delivery uses `auto_ack=False` + manual `basic_ack` —
-   inserts the order into `billing-database` **before** acknowledging.
+3. On `docker start billing-app`, the consumer reconnects (retry loop, heartbeats) and receives
+   the buffered message. Delivery uses `auto_ack=False` + manual acknowledgements: the order is
+   inserted into `billing-database` and **only then** acked on success. A failed insert is
+   `basic_nack(requeue=True)`d with a bounded redelivery counter, so the broker redelivers
+   rather than discarding; once the counter is exhausted the message is routed to a
+   dead-letter queue for inspection instead of vanishing.
 
 **Prove persistence:**
 
@@ -509,10 +546,14 @@ docker exec billing-database psql -U billing_user -d billing_db \
   OpenAPI 3.0 docs at `/api/docs` and `/openapi.yaml`, automated audit test suite
   (`make test` → `scripts/test_audit.sh`), Postman audit collection, rotating gateway log
   file on a named volume, comprehensive ADR documentation.
-- **"+Is this project an outstanding project?"** — Make the case: strict penultimate-Alpine
-  base with digest pinning, full network isolation verified by automated tests, zero-data-loss
-  queue buffering demonstrated live, structured dual-stream logging, complete docs
-  (README + ADR + this audit guide + theory guide).
+- **"+Is this project an outstanding project?"** — Make the case: every Dockerfile pinned to
+  the penultimate stable Alpine release (no floating `latest`), a single published port with
+  the rest of the stack internal to one user-defined bridge, network isolation and port
+  publishing asserted by an automated test suite, at-least-once queue buffering demonstrated
+  live (ack-only-on-success, nack-and-requeue with a bounded redelivery counter, and a
+  dead-letter queue as the terminal backstop — no silent loss), structured dual-stream logging
+  (stdout + a rotating file on a named volume), and complete docs (README + ADR + this audit
+  guide + theory guide).
 
 ---
 
@@ -523,16 +564,17 @@ Beyond the checklist, be ready for these natural follow-ups:
 | Question | Answer outline |
 |---|---|
 | Why Waitress and not `app.run()`? | Werkzeug is a dev server (single-threaded, debugger exposure). Waitress is a production pure-Python threaded WSGI server — no C build needed on musl/Alpine; threads suit I/O-bound proxy/DB workloads. |
-| What happens on `docker stop`? What is PID 1? | SIGTERM → grace period (10 s) → SIGKILL. Our `CMD` is exec-form so the app **is** PID 1 and receives SIGTERM directly; unhandled-signal default of PID 1 is *ignore*, hence exec form matters. |
+| What happens on `docker stop`? What is PID 1? | SIGTERM → grace period (10 s) → SIGKILL. Our `CMD` is exec-form so the app **is** PID 1 and receives SIGTERM directly; unhandled-signal default of PID 1 is *ignore*, hence exec form matters. This is the single canonical statement of the mechanism — see also §8 (Dockerfile table) and §10 (restart policy). |
 | Why did you choose musl/Alpine over Debian? | Smallest footprint, deterministic builds; pure-Python deps avoid the musllinux/manylinux wheel problem. Debian was the permitted alternative. |
-| `EXPOSE` vs `ports:` vs `expose:`? | `EXPOSE`/`expose:` are documentation metadata only; nothing is reachable from the host until `ports:`/`-p` publishes it (iptables DNAT). We publish exactly one port. |
+| `EXPOSE` vs `ports:` vs `expose:`? | `EXPOSE`/`expose:` are documentation metadata only; a port is not reachable *off* the host until `ports:`/`-p` publishes it (iptables DNAT). We publish exactly one port. |
 | What does `service_healthy` mean? | Compose waits until the dependency's HEALTHCHECK passes — unlike `service_started` (process merely launched). DBs gate the apps; the broker uses `service_started` + in-app retries. |
 | Does `unhealthy` restart a container? | No — restart policies trigger on exit status only; unhealthy is used for `depends_on` gating and diagnostics. |
 | Why `prefetch_count=1`? | Fair dispatch: the consumer holds one unacked message at a time; combining with manual acks means a crashed worker re-delivers, never loses work. |
-| What if a message is malformed? | It's a poison-message risk: we ack-and-discard invalid payloads (logged) to avoid head-of-line blocking of the whole queue. |
+| What if a message is malformed? | It's a poison-message risk: an unparseable or invalid payload is nacked with requeue off, so RabbitMQ dead-letters it instead of the message cycling forever and blocking the queue behind it (head-of-line blocking). Payload-shape failures are therefore never silently dropped — they end up inspectable in the DLQ. |
+| How is `pg_isready` different from a real login? | It only reports whether the server is accepting connections on that socket; it does **not** authenticate. Prove it: `docker exec inventory-database pg_isready -U bogus_user -d bogus_db -h 127.0.0.1; echo $?` prints `accepting connections` and returns `0` even with a non-existent user and database. So our DB healthchecks assert *readiness*, and real authentication (SCRAM-SHA-256, per `pg_hba.conf`) is what protects the data. |
 | How would you scale billing? | Run N `billing-app` replicas on the same queue — RabbitMQ fair-dispatches (prefetch=1). State is in PostgreSQL, workers are stateless. |
 | Where do credentials live at runtime? | Only in `.env` → Compose interpolation → container environment variables. Never baked into images. |
-| Are containers running as root? | Yes, currently no `USER` directive — a known hardening step would be adding a non-root user; acceptable within the subject's constraints. |
+| Are containers running as root? | The three application containers run as a dedicated non-root `USER`. The two PostgreSQL images and the RabbitMQ broker start as root only to `su-exec` down to `postgres`/`rabbitmq` before exec'ing the server — the conventional pattern, because they must `chown` their data directories first, which requires privilege to start with. |
 | Why not Kubernetes/Swarm? | Compose is single-host orchestration, matching the subject scope; K8s adds multi-node scheduling, self-healing rescheduling, and service discovery at cluster scale — unnecessary here. |
 | Is this portable to Podman? | Yes — same OCI images; Podman is daemonless/rootless; compose works via `podman-compose` or Docker Compose with the Podman socket. |
 
@@ -547,7 +589,8 @@ make up | make down | make restart | make clean | make rebuild
 # Status
 docker compose ps
 docker ps                          # names, images, ports
-docker volume ls                   # 3 exact volumes
+docker volume ls | grep -E 'inventory-database|billing-database|api-gateway-app'
+                                  # the 3 volumes required by audit.md
 docker images                      # 6 images, names == services
 
 # Audit-critical inspections
