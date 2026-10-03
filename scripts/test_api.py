@@ -132,9 +132,13 @@ class TestPayloadValidation(unittest.TestCase):
             "total_amount": "250"
         })
 
-        self.assertEqual(user_id, "20")
+        # user_id is an int, not the string "20". The column is INTEGER, so a
+        # string here would make `WHERE user_id = 20` compare int against
+        # varchar -- not a valid SQL operator, and a silent empty result set.
+        self.assertEqual(user_id, 20)
         self.assertEqual(number_of_items, 99)
         self.assertEqual(total_amount, Decimal("250"))
+        self.assertIsInstance(user_id, int)
         self.assertIsInstance(number_of_items, int)
         self.assertIsInstance(total_amount, Decimal)
 

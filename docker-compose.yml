@@ -88,6 +88,11 @@ services:
       INVENTORY_DB_USER: ${INVENTORY_DB_USER}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
       INVENTORY_DB_NAME: ${INVENTORY_DB_NAME}
+      # Bounded database-connect budget. A cold PostgreSQL cluster needs ~145s
+      # before it accepts connections, so 180 x 2s keeps a slow database from
+      # becoming a restart loop. Garbage values warn and fall back in-app.
+      DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}
+      DB_CONNECT_RETRY_DELAY: ${DB_CONNECT_RETRY_DELAY:-2}
     expose:
       - 8080
     networks:
@@ -114,6 +119,19 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
+      # Same three transport variables the gateway reads, and the same defaults.
+      # The publisher and the consumer must agree: a gateway on TLS feeding a
+      # plaintext consumer queues messages that nothing ever drains.
+      RABBITMQ_TLS: ${RABBITMQ_TLS:-}
+      RABBITMQ_CA_FILE: ${RABBITMQ_CA_FILE:-}
+      RABBITMQ_TLS_VERIFY: ${RABBITMQ_TLS_VERIFY:-1}
+      # Back off before requeueing a message we could not process. Requeueing
+      # instantly turns one poison message into a hot loop against the broker.
+      REDELIVERY_BACKOFF_SECONDS: ${REDELIVERY_BACKOFF_SECONDS:-5}
+      # Bounded database-connect budget, identical to inventory-app: a cold
+      # PostgreSQL needs ~145s before it accepts connections.
+      DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}
+      DB_CONNECT_RETRY_DELAY: ${DB_CONNECT_RETRY_DELAY:-2}
     expose:
       - 8080
     networks:
@@ -141,6 +159,23 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
+      # Bounded publish budget. Without it a broker that accepts the TCP
+      # connection but never completes the AMQP handshake stalls the POST for
+      # the client's full timeout, so the gateway has to give up quickly and
+      # say 503 rather than hold the request open. Garbage values warn and
+      # fall back in-app, so leaving these unset is safe.
+      RABBITMQ_SOCKET_TIMEOUT: ${RABBITMQ_SOCKET_TIMEOUT:-3}
+      RABBITMQ_PUBLISH_MAX_RETRIES: ${RABBITMQ_PUBLISH_MAX_RETRIES:-2}
+      RABBITMQ_RETRY_DELAY: ${RABBITMQ_RETRY_DELAY:-1}
+      # Transport security. Unset means plaintext AMQP on 5672, which is what
+      # this Compose network uses. Setting RABBITMQ_TLS also switches the
+      # default port to 5671 and the URL scheme to amqps://. NOTE: both ends
+      # must agree -- billing-app's consumer reads the same three variables,
+      # and a gateway on TLS with a plaintext consumer publishes into a queue
+      # nobody drains.
+      RABBITMQ_TLS: ${RABBITMQ_TLS:-}
+      RABBITMQ_CA_FILE: ${RABBITMQ_CA_FILE:-}
+      RABBITMQ_TLS_VERIFY: ${RABBITMQ_TLS_VERIFY:-1}
     volumes:
       - api-gateway:/usr/src/logs
     networks:
