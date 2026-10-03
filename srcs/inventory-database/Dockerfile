@@ -16,6 +16,9 @@ ENV PATH="/usr/libexec/postgresql17:/usr/bin:$PATH"
 # COPY --chmod sets the executable bit in the same layer instead of adding a
 # separate RUN chmod layer for a 20 kB metadata diff.
 COPY --chmod=0755 init-db.sh /usr/local/bin/init-db.sh
+# The schema is baked in and applied on EVERY boot, so a rotated Secret
+# converges instead of leaving a stale database behind.
+COPY --chmod=0644 init.sql /usr/local/share/init.sql
 
 EXPOSE 5432
 

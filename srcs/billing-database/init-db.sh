@@ -9,19 +9,43 @@ PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 mkdir -p "$PGDATA" /run/postgresql
 chown -R postgres:postgres /run/postgresql
 
-# Reconcile the application role and database against the current environment.
-# Runs on every boot, not only on first initialisation, so editing a credential
-# in `.env` is picked up instead of leaving a role whose password no longer
-# matches (which would surface as a confusing crash-loop in the app container
-# while the database container still reports itself healthy).
+# Reconcile the application role, database and schema against the current
+# environment. Runs on EVERY boot, not only on first initialisation, so editing
+# a credential in `.env` is picked up instead of leaving a role whose password
+# no longer matches (which would surface as a confusing crash-loop in the app
+# container while the database container still reports itself healthy).
+#
+# Exactly ONE temporary instance is started here and stopped again below --
+# psql cannot run before this, and starting a second one causes a
+# "postmaster.pid already exists" collision and CrashLoopBackOff.
+# `-c listen_addresses=''` keeps this half-initialised server off the network.
+#
+# ADAPTATION vs the reference implementation: the official `postgres` image has
+# an upstream entrypoint that points the socket directory at /var/run/postgresql
+# before doing any of this. This image is `alpine:3.23` +
+# `apk add postgresql17 postgresql17-client` (the project requirement forbids
+# pre-built images), which ships no such entrypoint, so the socket paths are set
+# explicitly on both sides: `unix_socket_directories` for the server and `-h` for
+# every psql invocation. Without them the bootstrap instance and psql disagree
+# about where the socket lives and psql falls back to TCP against a server that
+# is deliberately not listening on TCP.
+SOCKET_DIRS=/run/postgresql,/tmp
+INIT_SQL=/usr/local/share/init.sql
+
 reconcile() {
-  echo "[init-db] Reconciling role '$DB_USER' and database '$DB_NAME'..."
-  su-exec postgres pg_ctl -D "$PGDATA" -w start
+  echo "[init-db] Starting temporary instance to reconcile role, database and schema..."
+  su-exec postgres pg_ctl -D "$PGDATA" \
+    -o "-c listen_addresses='' -c unix_socket_directories=${SOCKET_DIRS}" -w start
 
   # The password is delivered through a 0600 file read by `psql -f` instead of
   # `-v db_password=...`, which would expose it in /proc/<pid>/cmdline to every
-  # process in the container. The file holds a `\set` line, so it must be quoted
-  # for psql: single quotes are doubled and backslashes are doubled.
+  # process in the container for the lifetime of the command. The file holds a
+  # `\set` line, so it must be quoted for psql: single quotes are doubled and
+  # backslashes are doubled.
+  #
+  # psql runs as postgres through su-exec: only the postgres user may read the
+  # 0600 password file, and running the client as an unprivileged user is the
+  # correct posture regardless of whether this client would tolerate root.
   local sql_file escaped_password
   sql_file="$(mktemp)"
   escaped_password="${DB_PASSWORD//\\/\\\\}"
@@ -41,11 +65,23 @@ reconcile() {
 
   # db_user / db_name are not secrets and stay in argv; db_password is not.
   su-exec postgres psql -U postgres -d postgres -q -v ON_ERROR_STOP=1 \
+       -h /run/postgresql \
        -v db_user="$DB_USER" -v db_name="$DB_NAME" -f "$sql_file" < /dev/null
   rm -f "$sql_file"
 
+  # Pre-create the application table schema in the target database, so the app
+  # never has to win a race against `create_all()` and so the schema exists
+  # even before the first app container connects. The schema itself lives in
+  # init.sql (baked into the image at /usr/local/share/init.sql), where
+  # user_id is INTEGER and total_amount is NUMERIC(12,2) to match
+  # srcs/billing-app/app/orders.py, and is written to be idempotent so this is
+  # safe on every restart.
+  su-exec postgres psql -U postgres -d "$DB_NAME" -q -v ON_ERROR_STOP=1 \
+       -h /run/postgresql -v db_user="$DB_USER" \
+       -f "$INIT_SQL" < /dev/null
+
   su-exec postgres pg_ctl -D "$PGDATA" -m fast -w stop
-  echo "[init-db] Role and database are in sync with the configured credentials."
+  echo "[init-db] Role, database and schema are in sync with the configured credentials."
 }
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
@@ -58,6 +94,7 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
 
   # Enable listening on all interfaces and allow network authentication
   echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
+  echo "unix_socket_directories = '${SOCKET_DIRS/,/, }'" >> "$PGDATA/postgresql.conf"
   echo "host all all 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
   echo "host all all ::/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
 

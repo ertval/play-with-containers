@@ -183,7 +183,17 @@ echo "--- 6. Inventory API Endpoints (Audit Requirements) ---"
 # Unique marker per run so assertions cannot be satisfied by rows left behind by
 # a previous execution, and so repeated runs stay idempotent.
 RUN_MARKER="audit-$$-$(date +%s)"
-SENTINEL_USER="${RUN_MARKER}"
+# The billing round-trip needs a user_id, and user_id is an INTEGER column that
+# the gateway now validates with a strict integer-literal regex: "007", "+5",
+# "1e3" and any non-numeric string are rejected with 400 before the message is
+# ever published. A marker like "audit-1234-1750000000" would therefore be
+# refused at the edge and the order would never exist to be asserted on -- the
+# test would fail for a reason that has nothing to do with what it measures.
+# So derive a numeric id from the marker instead: the leading 9 keeps it inside
+# INT32 and away from the small hand-picked ids the audit posts with, and the
+# checksum keeps it unique per run so a previous run's row cannot satisfy this
+# run's assertion.
+SENTINEL_USER="9$(printf '%s' "${RUN_MARKER}" | cksum | cut -c1-6)"
 CREATED_MOVIE_ID=""
 cleanup_inventory() {
     if [ -n "$CREATED_MOVIE_ID" ]; then
@@ -284,8 +294,10 @@ else
     log_fail "billing-app is still running!"
 fi
 
-# A graceful SIGTERM shutdown exits 0. Exit 137 means Docker had to SIGKILL the
-# process after its 10 s grace period, i.e. the app ignored SIGTERM.
+# A graceful SIGTERM shutdown exits 0. Exit 137 means Docker's SIGKILL fired
+# because the process was still alive when the grace period ran out, i.e. the
+# app ignored SIGTERM. Compose gives billing-app stop_grace_period: 20s
+# (docker-compose.yml), so anything at or past 20s is a failure to stop.
 if [ "$EXIT_CODE" = "0" ]; then
     log_pass "billing-app shut down gracefully on SIGTERM (exit 0, ${STOP_ELAPSED}s)"
 else

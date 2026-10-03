@@ -69,7 +69,24 @@ services:
     networks:
       - pwc-network
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # The readiness SENTINEL, not `rabbitmq-diagnostics -q ping`.
+      #
+      # `ping` only answers "is the Erlang VM up?", which succeeds within seconds
+      # of the broker starting - BEFORE srcs/rabbit-queue/entrypoint.sh has created
+      # RABBITMQ_USER, granted it permissions on the '/' vhost and deleted `guest`.
+      # A ping-based healthcheck therefore reports this container healthy during a
+      # window in which the only account that can authenticate is one no client is
+      # configured to use: `depends_on: rabbit-queue: condition: service_healthy`
+      # releases billing-app and api-gateway early, POST /api/billing/ fails with
+      # "(530) NOT_ALLOWED - access to vhost '/' refused", and every container still
+      # reports healthy.
+      #
+      # /tmp/rabbit-queue-ready is written only after
+      # `rabbitmqctl authenticate_user` succeeds, so it answers the question that
+      # actually matters: "can the credentials our clients use really log in?".
+      # `check_running` (rather than `ping`) is kept as the second half because it
+      # asserts the broker is still up, not merely that it once was configured.
+      test: ["CMD-SHELL", "test -f /tmp/rabbit-queue-ready && rabbitmq-diagnostics -q check_running"]
       interval: 10s
       timeout: 10s
       retries: 30

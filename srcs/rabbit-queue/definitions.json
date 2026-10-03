@@ -1,0 +1,50 @@
+{
+  "_comment": [
+    "Credential-free description of the broker topology this stack expects.",
+    "This file is the auditable reference for what entrypoint.sh creates at",
+    "runtime. It is intentionally NOT imported with `rabbitmqctl",
+    "import_definitions`: a definitions file must embed a password hash for",
+    "every user (the `users`/`password_hash` pair, i.e. an equivalent of the",
+    "credential itself), and committing that would put a secret in version",
+    "control. A tracked file that is never imported cannot leak one, and the",
+    "audit forbids storing sensitive data outside .env.",
+    "Credentials come from RABBITMQ_USER / RABBITMQ_PASSWORD in the environment",
+    "(compose `.env`) and are applied by entrypoint.sh, which verifies them with",
+    "`rabbitmqctl authenticate_user` before writing the /tmp/rabbit-queue-ready",
+    "sentinel that the healthcheck in docker-compose.yml waits for.",
+    "REPLACE_ME_* values below are placeholders, not secrets.",
+    "",
+    "rabbit_version is the major/minor of the broker this topology was written",
+    "against. This image is alpine:3.23 + `apk add rabbitmq-server`, whose version",
+    "tracks the Alpine 3.23 package (RabbitMQ 3.13.x), so the field matches the",
+    "reference stack even though the base image differs."
+  ],
+  "rabbit_version": "3.13",
+  "vhosts": [
+    {
+      "name": "/",
+      "description": "Default vhost used by the api-gateway publisher and the billing consumer"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "user": "REPLACE_ME_RABBITMQ_USER",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "queues": [
+    {
+      "name": "billing_queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [],
+  "bindings": [],
+  "topic_permissions": []
+}
