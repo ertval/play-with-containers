@@ -114,6 +114,13 @@ rabbitmqctl delete_user guest 2>/dev/null || true
 # script already calls (list_users / add_user / change_password /
 # set_user_tags / set_permissions / delete_user / await_startup), so it needs no
 # additional binary or plugin.
+# The one place a credential reaches `argv`, and `rabbitmqctl` offers no stdin
+# form of `authenticate_user` -- it takes the password positionally by design.
+# Unlike add_user/change_password above, which run on every boot and therefore
+# use stdin, this runs once, exits immediately, and is never visible to another
+# process in this single-purpose container. Stated rather than hidden, because a
+# documentation claim of "never in argv" that this line contradicts is worse
+# than the argv itself.
 if rabbitmqctl authenticate_user "$RABBITMQ_USER" "$RABBITMQ_PASSWORD" >/dev/null 2>&1; then
     touch "${READY_SENTINEL}"
     echo "[rabbit-queue] User '$RABBITMQ_USER' verified; readiness sentinel written to ${READY_SENTINEL}."

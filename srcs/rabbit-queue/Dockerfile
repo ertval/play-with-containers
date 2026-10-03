@@ -22,7 +22,9 @@ EXPOSE 5672 15672
 # POST /api/billing would fail with "(530) NOT_ALLOWED - access to vhost '/'
 # refused" while the container reports itself healthy. The sentinel is written by
 # entrypoint.sh only after `rabbitmqctl authenticate_user` succeeds.
-# docker-compose.yml overrides this with the same probe plus longer timings.
+# docker-compose.yml repeats this same probe with the same timings; the only
+# difference is that this form appends `|| exit 1`, since a HEALTHCHECK CMD run
+# through a shell already yields the command's exit status.
 HEALTHCHECK --interval=10s --timeout=10s --start-period=90s --retries=30 \
     CMD test -f /tmp/rabbit-queue-ready && rabbitmq-diagnostics -q check_running || exit 1
 

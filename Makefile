@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: all up down build logs ps clean rebuild restart help config lint test test-py
+.PHONY: all up down build logs ps clean rebuild restart help config lint test test-py test-unit
 
 all: up
 
@@ -12,7 +12,8 @@ help:
 	@echo "  make config    - validate compose file"
 	@echo "  make lint      - lint Dockerfiles (hadolint)"
 	@echo "  make test      - run audit E2E suite"
-	@echo "  make test-py   - run automated python test suite"
+	@echo "  make test-py   - run the API test suite (scripts/test_api.py)"
+	@echo "  make test-unit - run ALL unit suites via pytest (srcs/ + scripts/)"
 	@echo "  make restart   - restart all containers"
 	@echo "  make rebuild   - clean rebuild from scratch (no cache) and start"
 	@echo "  make down      - stop and remove containers + network (keeps volumes)"
@@ -69,4 +70,19 @@ test:
 
 test-py:
 	python3 scripts/test_api.py
+
+# The three ported suites under srcs/*/tests/ are unittest-based and are NOT
+# reached by test-py above, which runs a single file. Without this target the
+# shutdown-ordering, billing-validation and inventory-validation suites would
+# never be executed by anything in the Makefile -- 52 tests, including the only
+# coverage of the SIGTERM watchdog ordering and the Decimal/INTEGER handling.
+# Reads testpaths and the importlib import mode from pytest.ini.
+test-unit:
+	@python3 -c "import pytest" 2>/dev/null || { \
+		echo "error: pytest is not installed for python3."; \
+		echo "       run: python3 -m pip install -r requirements-dev.txt"; \
+		echo "       (or: uv run --with pytest make test-unit)"; \
+		exit 1; \
+	}
+	python3 -m pytest
 

@@ -17,6 +17,14 @@ the difference matters when you are standing in front of an evaluator:
 3. **Requires a running stack** — anything that needs `make up` first. Run these
    live; do not read a number from this document as if it were measured.
 
+**The rule to apply when you read any block below:** if it contains `curl`,
+`docker compose ps`, `docker port`, `docker inspect` against a *container*, or
+`docker exec`, it needs a running stack and its output is category 3 unless
+marked otherwise — re-run it live rather than reading it. Only blocks built from
+`grep`, `bash -n`, `shellcheck`, `python -m compileall`, `pytest`,
+`docker compose config`, `git ls-files` and friends are category 1, because
+those need nothing but the source tree.
+
 Nothing here is presented as captured output unless it is in category 1.
 
 ---
@@ -225,12 +233,22 @@ nowhere". An evaluator who greps `password\s*=` will find variable assignments
 such as `-v db_password="$DB_PASSWORD"`; those are references, not secrets. Say
 so plainly instead of claiming the grep returns nothing.
 
-**Say this as a design point, if it comes up:** *"`psql` and `rabbitmqctl` are
-both invoked without the password in `argv`. A password passed as a command-line
-argument is visible in `/proc/<pid>/cmdline` to every process in the container
-for the lifetime of the process. Our `init-db.sh` feeds it to `psql` through a
-`0600` file read by `psql -f`, and `entrypoint.sh` pipes it to
-`rabbitmqctl add_user` on stdin."*
+**Say this as a design point, if it comes up:** *"A password passed as a
+command-line argument is visible in `/proc/<pid>/cmdline` to every process in
+the container for the lifetime of the process, so we keep credentials out of
+`argv` as far as the tooling allows. `init-db.sh` feeds the password to `psql`
+through a `0600` file read by `psql -f`, and `entrypoint.sh` pipes it to
+`rabbitmqctl add_user` and `change_password` on stdin — those run on every boot.
+There is exactly one exception and I will name it rather than let you find it:
+the readiness check calls `rabbitmqctl authenticate_user`, and that subcommand
+takes the password positionally with no stdin form. It runs once at boot, exits
+immediately, and this is a single-purpose container with no other process to
+read `argv`, so the exposure is bounded to that one invocation."*
+
+Expect a follow-up on why not just skip the check. The answer is that the check
+is the fix: without it the broker reports healthy before the user exists, and
+`POST /api/billing/` fails intermittently with a permissions error while every
+container says it is fine.
 
 ### 2.4 Does the README contain everything needed to run and manage it?
 
@@ -650,18 +668,21 @@ docker compose ps
 **Expected shape** of `docker compose ps` on a fully healthy six-container stack
 — that is, the *structure* an evaluator will see. This was not captured from a
 live run; re-capture it with `docker compose ps` on the machine you present from.
-The `CREATED` ages are internally consistent with the dependency chain: the two
-databases and the broker come up first, then `inventory-app` and `billing-app`,
-and the gateway last, because it is gated on both of them.
+The `CREATED` ages reflect the dependency chain: the two databases and the broker
+come up first, then `inventory-app`, and the gateway once `inventory-app` *and*
+the broker are healthy. `billing-app` is deliberately not one of the gateway's
+dependencies — the gateway only publishes to the queue — so its container can be
+created at any point after its own database is ready, which is why it can look
+younger than the gateway.
 
 ```console
-NAME                IMAGE               COMMAND                  SERVICE             CREATED          STATUS                    PORTS
-api-gateway         api-gateway         "python3 server.py"      api-gateway         48 seconds ago   Up 48 seconds (healthy)    0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
-billing-app         billing-app         "python3 server.py"      billing-app         29 seconds ago   Up 29 seconds (healthy)    8080/tcp
-billing-database    billing-database    "/usr/local/bin/init…"   billing-database    2 minutes ago    Up 2 minutes (healthy)     5432/tcp
-inventory-app       inventory-app       "python3 server.py"      inventory-app       54 seconds ago   Up 54 seconds (healthy)    8080/tcp
-inventory-database  inventory-database  "/usr/local/bin/init…"   inventory-database  2 minutes ago    Up 2 minutes (healthy)     5432/tcp
-rabbit-queue        rabbit-queue        "/usr/local/bin/entr…"   rabbit-queue        2 minutes ago    Up 2 minutes (healthy)     5672/tcp, 15672/tcp
+NAME               IMAGE              COMMAND                SERVICE            CREATED        STATUS                  PORTS
+api-gateway        api-gateway        "python3 server.py"    api-gateway        48 seconds ago Up 48 seconds (healthy) 0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
+billing-app        billing-app        "python3 server.py"    billing-app        2 minutes ago  Up 2 minutes (healthy)  8080/tcp
+billing-database   billing-database   "/usr/local/bin/init…" billing-database   2 minutes ago  Up 2 minutes (healthy)  5432/tcp
+inventory-app      inventory-app      "python3 server.py"    inventory-app      2 minutes ago  Up 2 minutes (healthy)  8080/tcp
+inventory-database inventory-database "/usr/local/bin/init…" inventory-database 3 minutes ago  Up 3 minutes (healthy)  5432/tcp
+rabbit-queue       rabbit-queue       "/usr/local/bin/entr…" rabbit-queue       3 minutes ago  Up 3 minutes (healthy)  5672/tcp, 15672/tcp
 ```
 
 All six read `(healthy)`, and for `rabbit-queue` that now means something
@@ -688,8 +709,12 @@ how a cold boot avoids races:
 > on a cold boot could return 503. The applications additionally retry their
 > database connections for up to 360 s (180 attempts x 2 s), which covers the
 > window where PostgreSQL is still running `initdb` — a cold cluster was measured
-> at roughly 145 s before it accepted connections, so the previous 30 x 2 s = 60 s
-> budget was not merely tight, it was shorter than the thing it was waiting for."*
+> for as long as a cold `initdb` plus role, database and schema provisioning
+> takes, which on a slow disk can outlast a minute. The previous 30 x 2 s = 60 s
+> budget was not merely tight, it was not a safe bound at all — when it expired
+> `create_app()` re-raised, the process exited non-zero, and `restart: on-failure`
+> turned a slow database into a restart loop. (The sleep is *between* attempts, so
+> the real ceiling is 179 x 2 s = 358 s, not a flat 360.)"*
 
 **Say this if asked about the run order you observe:** *"The database
 entrypoints run `initdb` only when `$PGDATA/PG_VERSION` is absent, so a restart
@@ -723,12 +748,12 @@ done
 ```
 
 ```console
-inventory-database  {on-failure 0}
-billing-database    {on-failure 0}
-inventory-app       {on-failure 0}
-billing-app         {on-failure 0}
-rabbit-queue        {on-failure 0}
-api-gateway     {on-failure 0}
+inventory-database   {on-failure 0}
+billing-database     {on-failure 0}
+inventory-app        {on-failure 0}
+billing-app          {on-failure 0}
+rabbit-queue         {on-failure 0}
+api-gateway          {on-failure 0}
 ```
 
 **Direct answer:** *"Yes. All six containers are configured with
@@ -783,12 +808,12 @@ done
 ```
 
 ```console
-inventory-database  image=inventory-database
-billing-database    image=billing-database
-inventory-app       image=inventory-app
-billing-app         image=billing-app
-rabbit-queue        image=rabbit-queue
-api-gateway     image=api-gateway
+inventory-database   image=inventory-database
+billing-database     image=billing-database
+inventory-app        image=inventory-app
+billing-app          image=billing-app
+rabbit-queue         image=rabbit-queue
+api-gateway          image=api-gateway
 ```
 
 **If asked "how do you know the images are yours, not pulled?"** show the history:
@@ -816,8 +841,8 @@ exact names, mounted where they belong."*
 
 ```console
 volume inventory-database -> /var/lib/postgresql/data
-volume billing-database   -> /var/lib/postgresql/data
-volume api-gateway    -> /usr/src/logs
+volume billing-database -> /var/lib/postgresql/data
+volume api-gateway -> /usr/src/logs
 ```
 
 **Prove the log volume is actually in use** (an empty mount proves nothing):
@@ -840,12 +865,12 @@ printf '%-20s %s\n' api-gateway "$(docker port api-gateway)"
 ```
 
 ```console
-inventory-database  no published port
-billing-database    no published port
-inventory-app       no published port
-billing-app         no published port
-rabbit-queue        no published port
-api-gateway     3000/tcp -> 0.0.0.0:3000
+inventory-database   no published port
+billing-database     no published port
+inventory-app        no published port
+billing-app          no published port
+rabbit-queue         no published port
+api-gateway          3000/tcp -> 0.0.0.0:3000
 ```
 
 **Direct answer:** *"Yes. Only `api-gateway` has a `ports:` mapping, and it is
@@ -1033,7 +1058,7 @@ docker inspect -f '{{.State.Running}}' billing-app
 ```
 
 ```console
-billing-app   Exited (0) 2 seconds ago
+billing-app          Exited (0) 2 seconds ago
 false
 ```
 
@@ -1252,8 +1277,9 @@ Name them concretely, and be ready to demo any of them on request:
    `basic_nack(requeue=True)` — never an ack — plus a 5-second backoff before
    requeue, so one poison message cannot become a hot loop against the broker.
 
-10. **Security hardening beyond the brief.** Non-root application containers; no
-   password in any `argv`; secrets fail closed; destructive catalogue deletion
+10. **Security hardening beyond the brief.** Non-root application containers;
+   no password in `argv` on any boot-time path, with the one documented
+   exception; secrets fail closed; destructive catalogue deletion
    gated behind `?confirm=all`; upstream path sanitisation and bounded retries
    in the proxy; publisher confirms and mandatory delivery.
 11. **Operational health, with liveness and readiness separated.** `/health` on
@@ -1286,7 +1312,7 @@ Have a short, specific answer ready rather than a claim:
 > sentinel so it cannot pass on rows left by a previous run, and it asserts
 > against `docker port` rather than a host socket, which is what caught a
 > false failure in an earlier version. And the security posture is consistent
-> rather than incidental: no secret in any image layer, none in any `argv`,
+> rather than incidental: no secret in any image layer, none in any `argv` apart from the single `authenticate_user` call, which is explained above,
 > failing closed, non-root where possible, one published port."*
 
 ---

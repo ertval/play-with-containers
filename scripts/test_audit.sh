@@ -193,7 +193,12 @@ RUN_MARKER="audit-$$-$(date +%s)"
 # INT32 and away from the small hand-picked ids the audit posts with, and the
 # checksum keeps it unique per run so a previous run's row cannot satisfy this
 # run's assertion.
-SENTINEL_USER="9$(printf '%s' "${RUN_MARKER}" | cksum | cut -c1-6)"
+# Extract the CRC FIELD, not characters 1-6 of the line: `cksum` prints
+# "<crc> <byte-count>", so cutting six characters would pull in the separating
+# space and part of the byte count whenever the CRC is shorter than six digits --
+# rare, but it produced a sentinel like "1234 2" and a confusing 400 instead of a
+# test failure. awk takes field 1, so the result is always pure digits.
+SENTINEL_USER="9$(printf '%s' "${RUN_MARKER}" | cksum | awk '{print $1}' | cut -c1-6)"
 CREATED_MOVIE_ID=""
 cleanup_inventory() {
     if [ -n "$CREATED_MOVIE_ID" ]; then

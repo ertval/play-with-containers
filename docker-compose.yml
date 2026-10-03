@@ -105,9 +105,12 @@ services:
       INVENTORY_DB_USER: ${INVENTORY_DB_USER}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
       INVENTORY_DB_NAME: ${INVENTORY_DB_NAME}
-      # Bounded database-connect budget. A cold PostgreSQL cluster needs ~145s
-      # before it accepts connections, so 180 x 2s keeps a slow database from
-      # becoming a restart loop. Garbage values warn and fall back in-app.
+      # Bounded database-connect budget. A cold PostgreSQL cluster can need a
+      # minute or more before it accepts connections (initdb plus role, database
+      # and schema provisioning), and the previous 30 x 2s budget could expire
+      # before that finished, turning a slow database into a restart loop.
+      # 180 attempts x 2s; the sleep is between attempts, so the ceiling is
+      # 179 x 2s = 358s. Garbage values warn and fall back in-app.
       DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}
       DB_CONNECT_RETRY_DELAY: ${DB_CONNECT_RETRY_DELAY:-2}
     expose:
@@ -146,7 +149,7 @@ services:
       # instantly turns one poison message into a hot loop against the broker.
       REDELIVERY_BACKOFF_SECONDS: ${REDELIVERY_BACKOFF_SECONDS:-5}
       # Bounded database-connect budget, identical to inventory-app: a cold
-      # PostgreSQL needs ~145s before it accepts connections.
+      # PostgreSQL can need a minute or more before it accepts connections.
       DB_CONNECT_MAX_RETRIES: ${DB_CONNECT_MAX_RETRIES:-180}
       DB_CONNECT_RETRY_DELAY: ${DB_CONNECT_RETRY_DELAY:-2}
     expose:
