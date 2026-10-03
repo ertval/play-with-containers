@@ -16,10 +16,10 @@
     "",
     "rabbit_version is the major/minor of the broker this topology was written",
     "against. This image is alpine:3.23 + `apk add rabbitmq-server`, whose version",
-    "tracks the Alpine 3.23 package (RabbitMQ 3.13.x), so the field matches the",
-    "reference stack even though the base image differs."
+    "tracks the Alpine 3.23 community package (RabbitMQ 4.2.7-r0), so the field",
+    "matches the reference stack even though the base image differs."
   ],
-  "rabbit_version": "3.13",
+  "rabbit_version": "4.2",
   "vhosts": [
     {
       "name": "/",

@@ -991,7 +991,6 @@ except RuntimeError as e:
 > it is what stops a missing broker credential from taking `/health` down with
 > the rest of the gateway — so this ordering is the intended design, not an
 > oversight.
-```
 
 **Direct answer:** *"Secrets exist at runtime in the container environment and
 nowhere else. They arrive from `.env` through Compose interpolation; the images
@@ -1211,7 +1210,7 @@ docker logs billing-app --since 60s 2>&1 | grep -E "Connected to RabbitMQ|Succes
 ```
 
 > Every line is prefixed with a timestamp (`%(asctime)s`, set in
-> `srcs/billing-app/app/__init__.py:11`), and the grep also returns pika's own
+> `srcs/billing-app/app/__init__.py:12`), and the grep also returns pika's own
 > `AMQPConnectionWorkflow` lines. Order `#2` is what you see on a fresh database;
 > a higher number just means earlier orders exist.
 

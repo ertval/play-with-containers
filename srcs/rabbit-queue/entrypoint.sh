@@ -14,12 +14,17 @@ fi
 
 # Readiness sentinel, consumed by the healthcheck in docker-compose.yml (and by
 # the Dockerfile's own HEALTHCHECK).
-# Lives in /tmp (NOT /var/lib/rabbitmq) on purpose: /var/lib/rabbitmq is the
-# persistent state directory, so a sentinel there would still be present on the
-# next container start and the probe would report Ready before this broker had
-# been configured. /tmp is part of the container filesystem, so it is always
-# empty at boot and the file below only appears once configuration has fully
-# succeeded. It is also `rm -f`'d below, so it can never be a stale artefact.
+# Lives in /tmp rather than /var/lib/rabbitmq because /var/lib/rabbitmq is where
+# the broker keeps its Mnesia state -- the one directory that *would* survive a
+# restart if this service were ever given a volume. Keeping the sentinel outside
+# it means the file can only ever mean "configured during this boot", never
+# "configured at some point in the image's history".
+# Note that `rabbit-queue` currently mounts no volumes at all, so today
+# /var/lib/rabbitmq is discarded with the container and the distinction is
+# belt-and-braces rather than load-bearing. It starts to matter the moment
+# someone adds a volume, which is the obvious production change; the credential
+# reconciliation below depends on the same assumption in the other direction
+# (it only finds an existing user if the Mnesia dir persisted).
 READY_SENTINEL=/tmp/rabbit-queue-ready
 rm -f "${READY_SENTINEL}"
 

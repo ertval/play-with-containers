@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS orders (
     -- already present and silently keeps money in a float column.
     total_amount    NUMERIC(12, 2) NOT NULL,
     -- TIMESTAMP WITH TIME ZONE matches DateTime(timezone=True) in the model.
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 SELECT format('ALTER TABLE orders OWNER TO %I', :'db_user') \gexec

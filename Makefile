@@ -24,7 +24,7 @@ COMPOSE := docker compose
 up:
 	@$(COMPOSE) version >/dev/null 2>&1 || { \
 		echo "error: Docker Compose v2 ('docker compose') is required."; \
-		echo "       The --wait flag used here needs v2.1+."; exit 1; }
+		echo "       The --wait flag used here needs v2.17.0+."; exit 1; }
 	$(COMPOSE) up --build -d --wait --wait-timeout 240
 
 build:
@@ -80,8 +80,8 @@ test-py:
 test-unit:
 	@python3 -c "import pytest" 2>/dev/null || { \
 		echo "error: pytest is not installed for python3."; \
-		echo "       run: python3 -m pip install -r requirements-dev.txt"; \
-		echo "       (or: uv run --with pytest make test-unit)"; \
+		echo "       run: python3 -m pip install pytest"; \
+		echo "       (or, without installing anything: uv run --with pytest make test-unit)"; \
 		exit 1; \
 	}
 	python3 -m pytest
