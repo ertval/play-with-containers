@@ -202,6 +202,65 @@ class TestOpenAPISpecification(unittest.TestCase):
         )
 
 
+class TestSpecAgreesWithCode(unittest.TestCase):
+    """The OpenAPI document must not describe status codes the code never returns.
+
+    A 502-vs-503 mismatch lived in this spec for the whole life of the project.
+    Every existing assertion checked that the spec was valid YAML, declared the
+    right paths, and carried a version string -- none of which notice that the
+    documented status code disagrees with the handler. A specification that
+    contradicts the implementation is worse than no specification, because an
+    examiner validating against it gets a different answer than the server gives.
+    """
+
+    def test_upstream_failure_is_documented_as_503(self):
+        spec = open(
+            os.path.join(REPO_ROOT, "srcs", "api-gateway", "openapi.yaml"), encoding="utf-8"
+        ).read()
+        self.assertNotIn(
+            "'502'", spec,
+            "openapi.yaml still documents 502 for upstream failure, but proxy.py "
+            "returns 503 (DEPENDENCY_UNAVAILABLE_ERROR / BROKER_UNAVAILABLE_ERROR)",
+        )
+        self.assertIn("'503'", spec, "openapi.yaml does not document the 503 the code returns")
+
+    def test_every_documented_error_code_is_one_the_proxy_can_return(self):
+        """Cross-check the spec's status codes against the proxy's actual returns."""
+        spec = open(
+            os.path.join(REPO_ROOT, "srcs", "api-gateway", "openapi.yaml"), encoding="utf-8"
+        ).read()
+        proxy = open(
+            os.path.join(REPO_ROOT, "srcs", "api-gateway", "app", "proxy.py"), encoding="utf-8"
+        ).read()
+        documented = set(re.findall(r"^\s{8}'(\d{3})':", spec, re.M))
+        self.assertTrue(documented, "no status codes parsed from the spec - the regex is wrong")
+        returned = set(re.findall(r",\s*(\d{3})\s*$", proxy, re.M))
+        # Only status codes the gateway ORIGINATES are checked. Two documented
+        # codes are produced without appearing as a return in proxy.py and are
+        # legitimately absent from `returned`:
+        #   4xx other than 400/503  relayed verbatim from inventory-app; the
+        #                             gateway re-labels 5xx only (see
+        #                             _upstream_5xx) and passes 4xx through.
+        #   413                     raised by Flask itself when the body exceeds
+        #                             MAX_CONTENT_LENGTH, before any handler runs.
+        originating = returned | {"413"} | {c for c in documented if c.startswith("4")}
+        unknown = documented - originating
+        self.assertFalse(
+            unknown,
+            f"openapi.yaml documents status codes the gateway never produces: "
+            f"{sorted(unknown)}. proxy.py returns {sorted(returned)}; any other 4xx "
+            f"is relayed from inventory-app and 413 comes from Flask.",
+        )
+        # The narrow invariant that actually matters: no 5xx may be documented
+        # other than the 503 the gateway returns itself.
+        bogus_5xx = {c for c in documented if c.startswith("5")} - returned
+        self.assertFalse(
+            bogus_5xx,
+            f"openapi.yaml documents 5xx codes the gateway never returns: "
+            f"{sorted(bogus_5xx)} (it returns {sorted(returned)})",
+        )
+
+
 class TestLiveAPIGateway(unittest.TestCase):
     """Integration tests running against the live API Gateway if running.
     Require `docker compose up` first; skipped offline unless STRICT_LIVE=1/CI=true.
