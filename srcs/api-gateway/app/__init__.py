@@ -20,7 +20,9 @@ def setup_logging():
 
     # Avoid adding duplicate handlers if reinitialized
     if not root_logger.handlers:
-        # Stream Handler (stdout)
+        # Stream handler. StreamHandler() with no argument writes to
+        # sys.stderr, not stdout -- `docker compose logs` captures both, but
+        # the distinction matters if you ever pipe stdout only.
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
         root_logger.addHandler(stream_handler)

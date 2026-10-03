@@ -465,11 +465,13 @@ wait "$SERVER_PID"                              # PID1 semantics live here
   POST success returns `(body, 200)`; response envelope `{"movies": [...]}`;
   single-movie endpoints return bare JSON objects.
 - billing-app callback order: log receive → json.loads (failure → log+ack) →
-  explicit coercion `int(number_of_items)`, `float(total_amount)`,
-  `str(user_id)` → insert → ack. Redelivery counter guards transient failures.
+  explicit coercion `int(number_of_items)`, `Decimal(total_amount)`,
+  `str(user_id)` → insert → ack. A failed insert is retried a bounded number
+  of times inside one delivery, then `basic_nack(requeue=True)`; no redelivery
+  counter and no dead-letter exchange are declared.
 - gateway `/api/billing/`: reject non-JSON 400 → publish stringified body →
   reply `{"message": "<raw payload> sent"}, 200`.
-- Logging (gateway): python logging → StreamHandler(stdout) +
+- Logging (gateway): python logging → StreamHandler(stderr) +
   RotatingFileHandler('/usr/src/logs/gateway.log'), same formatter/timezone;
   request line + upstream status recorded.
 
