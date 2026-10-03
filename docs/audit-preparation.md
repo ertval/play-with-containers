@@ -194,7 +194,7 @@ docker compose ps
 ```
 
 All six containers start: `inventory-database`, `billing-database`, `inventory-app`,
-`billing-app`, `rabbit-queue`, `api-gateway-app` — each reaching `healthy`/`running`.
+`billing-app`, `rabbit-queue`, `api-gateway` — each reaching `healthy`/`running`.
 
 **Why cold boot never deadlocks** (likely follow-up): databases run `pg_isready`
 healthchecks; apps use two-tier dependencies — `service_healthy` on databases, plus
@@ -266,7 +266,7 @@ instructions (ENV, EXPOSE, CMD) configure the image.
 
 ### "Explain the instructions used on the Dockerfile."
 
-Explain on the live `srcs/api-gateway-app/Dockerfile`:
+Explain on the live `srcs/api-gateway/Dockerfile`:
 
 | Instruction | Our usage |
 |---|---|
@@ -299,7 +299,7 @@ Explain on the live `srcs/api-gateway-app/Dockerfile`:
 | inventory-app | inventory-app | `8080/tcp` |
 | billing-app | billing-app | `8080/tcp` |
 | rabbit-queue | rabbit-queue | `5672/tcp`, `15672/tcp` |
-| api-gateway-app | api-gateway-app | `0.0.0.0:3000->3000/tcp` (only published port) |
+| api-gateway | api-gateway | `0.0.0.0:3000->3000/tcp` (only published port) |
 
 ### Role answers (adapted from the audit's per-container description)
 
@@ -312,7 +312,7 @@ Explain on the live `srcs/api-gateway-app/Dockerfile`:
 - **billing-app** — worker consuming billing messages from the RabbitMQ queue and writing
   orders into billing-database, port 8080 internal.
 - **rabbit-queue** — RabbitMQ server holding the durable `billing_queue`.
-- **api-gateway-app** — reverse proxy forwarding `/api/movies` to inventory-app and
+- **api-gateway** — reverse proxy forwarding `/api/movies` to inventory-app and
   publishing billing messages to RabbitMQ; the only published service, port 3000.
 
 > **Wording note**: the audit text says "Node.js server". Our servers are Python/Flask — the
@@ -324,7 +324,7 @@ Explain on the live `srcs/api-gateway-app/Dockerfile`:
 ## 10. Section: Restart Policy
 
 ```bash
-for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway-app; do
+for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway; do
   docker inspect -f "{{ .HostConfig.RestartPolicy }}" "$s"
 done
 # → {on-failure 0}   × 6
@@ -354,7 +354,7 @@ docker volume ls
 # DRIVER    VOLUME NAME
 # local     inventory-database      ← this project
 # local     billing-database        ← this project
-# local     api-gateway-app         ← this project
+# local     api-gateway         ← this project
 # local     <others>                 ← unrelated projects on the same host
 ```
 
@@ -365,7 +365,7 @@ docker volume ls
 
 - `inventory-database` → mounted at `/var/lib/postgresql/data` (inventory catalogue data)
 - `billing-database` → mounted at `/var/lib/postgresql/data` (billing orders data)
-- `api-gateway-app` → mounted at `/usr/src/logs` (rotating `gateway.log`)
+- `api-gateway` → mounted at `/usr/src/logs` (rotating `gateway.log`)
 
 `rabbit-queue` has no volume. Queue durability for the audit outage comes from a durable
 queue and persistent messages on the running broker, not from a named volume. Removing the
@@ -373,7 +373,7 @@ broker container discards that node state.
 
 `docker volume ls` lists **every** volume on the host, including ones from unrelated
 projects; to show only this stack's, filter by name (`docker volume ls | grep -E
-'inventory-database|billing-database|api-gateway-app'`) or scope the evidence to
+'inventory-database|billing-database|api-gateway'`) or scope the evidence to
 the project prefix-free names above.
 
 ### "What is a Docker volume?"
@@ -395,13 +395,13 @@ path.
 
 ## 12. Section: Solution Network
 
-### "Is the connection to the api-gateway-app the only one exposed from outside of the Docker host?"
+### "Is the connection to the api-gateway the only one exposed from outside of the Docker host?"
 
 **Yes.** Demonstrate:
 
 ```bash
 docker ps --format '{{.Names}}: {{.Ports}}'
-# only api-gateway-app shows a host mapping: 0.0.0.0:3000->3000
+# only api-gateway shows a host mapping: 0.0.0.0:3000->3000
 curl -s http://localhost:3000/health            # → reachable
 curl -s --connect-timeout 2 http://localhost:5432  # → connection refused (as expected)
 ```
@@ -435,7 +435,7 @@ each other by service name.
 ```bash
 docker images
 # inventory-database, billing-database, inventory-app,
-# billing-app, rabbit-queue, api-gateway-app   ← one image per service
+# billing-app, rabbit-queue, api-gateway   ← one image per service
 ```
 
 ### "Is there a Docker image for each service with the same service name?"
@@ -589,12 +589,12 @@ make up | make down | make restart | make clean | make rebuild
 # Status
 docker compose ps
 docker ps                          # names, images, ports
-docker volume ls | grep -E 'inventory-database|billing-database|api-gateway-app'
+docker volume ls | grep -E 'inventory-database|billing-database|api-gateway'
                                   # the 3 volumes required by audit.md
 docker images                      # 6 images, names == services
 
 # Audit-critical inspections
-docker inspect -f "{{ .HostConfig.RestartPolicy }}" api-gateway-app   # {on-failure 0}
+docker inspect -f "{{ .HostConfig.RestartPolicy }}" api-gateway   # {on-failure 0}
 docker inspect -f '{{.Config.Image}}' billing-app                     # == service name
 
 # Full automated audit suite

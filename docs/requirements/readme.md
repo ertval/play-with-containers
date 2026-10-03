@@ -75,7 +75,7 @@ for `Alpine` and `Debian`.
   It will be connected to the billing database and consuming the messages from
   the RabbitMQ queue. It will be accessible via port `8080`.
 - `rabbit-queue` is a RabbitMQ server that contains the queue.
-- `api-gateway-app container` is a server that contains your
+- `api-gateway container` is a server that contains your
   API gateway. It will forward the requests to the other services, and it's
   accessible via port `3000`.
 
@@ -85,13 +85,13 @@ for `Alpine` and `Debian`.
 
 - `inventory-db volume` contains your inventory database.
 - `billing-db volume` contains your billing database.
-- `api-gateway-app volume` contains your API gateway logs.
+- `api-gateway volume` contains your API gateway logs.
 
 #### Docker Network:
 
 - You must have a docker network that establishes the connection between all
   services inside your docker host.
-- Any outside request must be able to access only the `api-gateway-app` via
+- Any outside request must be able to access only the `api-gateway` via
   port `3000`.
 
 > All resources in your infrastructure must be targeted and managed by

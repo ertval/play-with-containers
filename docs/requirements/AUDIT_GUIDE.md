@@ -449,7 +449,7 @@ also bypass copy-on-write, so database writes go straight to host storage."*
 |---|---|---|
 | `inventory-database` | `/var/lib/postgresql/data` | The inventory PostgreSQL cluster |
 | `billing-database` | `/var/lib/postgresql/data` | The billing PostgreSQL cluster |
-| `api-gateway-app` | `/usr/src/logs` | Rotating gateway access logs |
+| `api-gateway` | `/usr/src/logs` | Rotating gateway access logs |
 
 **Say this:** *"The `name:` key in `docker-compose.yml` is what makes the volume
 appear as exactly `inventory-database` rather than
@@ -470,7 +470,7 @@ hardcoded address, and isolation, so services on it are reachable from other
 containers but not from outside the host unless a port is explicitly published."*
 
 **Say this about DNS:** *"On a user-defined bridge, Docker runs an embedded
-resolver at `127.0.0.11`. `api-gateway-app` addresses the inventory service as
+resolver at `127.0.0.11`. `api-gateway` addresses the inventory service as
 `http://inventory-app:8080` and gets the container's IP from that resolver.
 That is why there are no hardcoded IPs anywhere in our code, and why scaling or
 recreating a container does not require a configuration change."*
@@ -511,7 +511,7 @@ Alpine base do not cost six copies of the base."*
 **Verify — the image layer cache is visible:**
 
 ```bash
-docker history api-gateway-app
+docker history api-gateway
 ```
 
 ---
@@ -619,7 +619,7 @@ Real output on a cold boot (the exact shape an evaluator will see):
 
 ```console
 NAME                 IMAGE                COMMAND                  SERVICE              CREATED          STATUS                    PORTS
-api-gateway-app      api-gateway-app      "python3 server.py"      api-gateway-app      48 seconds ago   Up 48 seconds (healthy)    0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
+api-gateway      api-gateway      "python3 server.py"      api-gateway      48 seconds ago   Up 48 seconds (healthy)    0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
 billing-app          billing-app          "python3 server.py"      billing-app          29 seconds ago   Up 29 seconds (healthy)    8080/tcp
 billing-database     billing-database     "/usr/local/bin/init…"   billing-database     1 minute ago     Up 1 minute (healthy)      5432/tcp
 inventory-app        inventory-app        "python3 server.py"      inventory-app        54 seconds ago   Up 54 seconds (healthy)    8080/tcp
@@ -666,12 +666,12 @@ Confirm the mapping the brief requires:
 | `inventory-app` | `8080/tcp` | No | Node/Python inventory service |
 | `billing-app` | `8080/tcp` | No | Billing service, consumes the queue |
 | `rabbit-queue` | `5672/tcp`, `15672/tcp` | No | RabbitMQ broker and management UI |
-| `api-gateway-app` | `3000/tcp` | **Yes — `0.0.0.0:3000->3000/tcp`** | The only ingress point |
+| `api-gateway` | `3000/tcp` | **Yes — `0.0.0.0:3000->3000/tcp`** | The only ingress point |
 
 **Restart policy — the exact string the checklist expects**
 
 ```bash
-for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway-app; do
+for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway; do
   printf '%-20s %s\n' "$s" "$(docker inspect -f '{{.HostConfig.RestartPolicy}}' "$s")"
 done
 ```
@@ -682,7 +682,7 @@ billing-database    {on-failure 0}
 inventory-app       {on-failure 0}
 billing-app         {on-failure 0}
 rabbit-queue        {on-failure 0}
-api-gateway-app     {on-failure 0}
+api-gateway     {on-failure 0}
 ```
 
 **Direct answer:** *"Yes. All six containers are configured with
@@ -731,7 +731,7 @@ docker images
 identical to its service name, as the brief requires."*
 
 ```bash
-for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway-app; do
+for s in inventory-database billing-database inventory-app billing-app rabbit-queue api-gateway; do
   printf '%-20s image=%s\n' "$s" "$(docker inspect -f '{{.Config.Image}}' "$s")"
 done
 ```
@@ -742,7 +742,7 @@ billing-database    image=billing-database
 inventory-app       image=inventory-app
 billing-app         image=billing-app
 rabbit-queue        image=rabbit-queue
-api-gateway-app     image=api-gateway-app
+api-gateway     image=api-gateway
 ```
 
 **If asked "how do you know the images are yours, not pulled?"** show the history:
@@ -762,7 +762,7 @@ All six are `FROM alpine:3.23` and install their software with `apk add`. No
 docker volume ls
 docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{println}}{{end}}' inventory-database
 docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{println}}{{end}}' billing-database
-docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{println}}{{end}}' api-gateway-app
+docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{println}}{{end}}' api-gateway
 ```
 
 **Direct answer:** *"Yes. Exactly the three volumes the brief requires, with the
@@ -771,15 +771,15 @@ exact names, mounted where they belong."*
 ```console
 volume inventory-database -> /var/lib/postgresql/data
 volume billing-database   -> /var/lib/postgresql/data
-volume api-gateway-app    -> /usr/src/logs
+volume api-gateway    -> /usr/src/logs
 ```
 
 **Prove the log volume is actually in use** (an empty mount proves nothing):
 
 ```bash
-docker exec api-gateway-app ls -l /usr/src/logs/
+docker exec api-gateway ls -l /usr/src/logs/
 # -rw-r--r-- 1 app app ... gateway.log
-docker exec api-gateway-app tail -3 /usr/src/logs/gateway.log
+docker exec api-gateway tail -3 /usr/src/logs/gateway.log
 ```
 
 ### 10.5 Is the API gateway the only service exposed outside the host?
@@ -790,7 +790,7 @@ docker exec api-gateway-app tail -3 /usr/src/logs/gateway.log
 for s in inventory-database billing-database inventory-app billing-app rabbit-queue; do
   printf '%-20s %s\n' "$s" "$(docker port "$s" 2>/dev/null || echo 'no published port')"
 done
-printf '%-20s %s\n' api-gateway-app "$(docker port api-gateway-app)"
+printf '%-20s %s\n' api-gateway "$(docker port api-gateway)"
 ```
 
 ```console
@@ -799,10 +799,10 @@ billing-database    no published port
 inventory-app       no published port
 billing-app         no published port
 rabbit-queue        no published port
-api-gateway-app     3000/tcp -> 0.0.0.0:3000
+api-gateway     3000/tcp -> 0.0.0.0:3000
 ```
 
-**Direct answer:** *"Yes. Only `api-gateway-app` has a `ports:` mapping, and it is
+**Direct answer:** *"Yes. Only `api-gateway` has a `ports:` mapping, and it is
 the only container the daemon publishes on the host. The other five use `expose:`,
 which is metadata and creates no host rule, so the databases, the broker and the
 internal services are reachable only from other containers on the bridge
@@ -811,7 +811,7 @@ network."*
 **Verify from inside the network, to prove the services are alive but private:**
 
 ```bash
-docker exec api-gateway-app python3 -c "import urllib.request; print(urllib.request.urlopen('http://inventory-app:8080/health').read().decode())"
+docker exec api-gateway python3 -c "import urllib.request; print(urllib.request.urlopen('http://inventory-app:8080/health').read().decode())"
 # {"status":"healthy"}
 ```
 
@@ -832,7 +832,7 @@ docker exec inventory-database sh -c 'echo "user=$DB_USER db=$DB_NAME"'
 # user=inventory_user db=inventory_db
 
 # The app fails closed rather than defaulting
-docker exec api-gateway-app python3 -c "
+docker exec api-gateway python3 -c "
 import os
 os.environ.pop('RABBITMQ_PASSWORD', None)
 from app.queue_sender import _require_env
@@ -1139,7 +1139,7 @@ Name them concretely, and be ready to demo any of them on request:
    Python tests, four of which run real HTTP against the gateway.
 3. **Complete lifecycle automation.** `make up|down|build|ps|logs|clean|rebuild|restart|config|lint|test|test-py|help`.
 4. **Persistent dual-stream logging.** The gateway writes to stdout *and* to a
-   rotating 5 MB × 3 file on the `api-gateway-app` volume, so logs survive a
+   rotating 5 MB × 3 file on the `api-gateway` volume, so logs survive a
    container replacement.
 5. **Security hardening beyond the brief.** Non-root application containers; no
    password in any `argv`; secrets fail closed; destructive catalogue deletion
@@ -1187,11 +1187,11 @@ Have a short, specific answer ready rather than a claim:
 | Restart actually works | `docker kill -s KILL inventory-app; sleep 8` | `RestartCount` increments |
 | Graceful stop | `docker stop billing-app` | exit `0` |
 | Images | `docker inspect -f '{{.Config.Image}}' <c>` | name equals service name |
-| Image history | `docker history api-gateway-app` | all `apk`/`pip`, no Hub service image |
-| Volumes exist | `docker volume ls` | `inventory-database`, `billing-database`, `api-gateway-app` |
+| Image history | `docker history api-gateway` | all `apk`/`pip`, no Hub service image |
+| Volumes exist | `docker volume ls` | `inventory-database`, `billing-database`, `api-gateway` |
 | Volume mounts | `docker inspect -f '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{end}}' <c>` | correct destination |
 | Only gateway published | `docker port <c>` | empty for the five internal services |
-| Inter-container DNS | `docker exec api-gateway-app python3 -c "import urllib.request;print(urllib.request.urlopen('http://inventory-app:8080/health').read())"` | `{"status":"healthy"}` |
+| Inter-container DNS | `docker exec api-gateway python3 -c "import urllib.request;print(urllib.request.urlopen('http://inventory-app:8080/health').read())"` | `{"status":"healthy"}` |
 | POST `/api/movies/` | `curl -i -X POST http://localhost:3000/api/movies/ -H "Content-Type: application/json" -d '{"title":"A new movie","description":"Very short description"}'` | `200` + JSON with `id` |
 | GET `/api/movies/` | `curl -i http://localhost:3000/api/movies/` | `200` + the movie just added |
 | POST `/api/billing/` | `curl -i -X POST http://localhost:3000/api/billing/ -H "Content-Type: application/json" -d '{"user_id":"20","number_of_items":"99","total_amount":"250"}'` | `200` |

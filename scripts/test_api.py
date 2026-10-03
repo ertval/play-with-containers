@@ -176,14 +176,14 @@ class TestOpenAPISpecification(unittest.TestCase):
         self.assertIn("openapi: 3.0", content)
 
     def test_served_spec_matches_repo_copy(self):
-        """The gateway serves srcs/api-gateway-app/openapi.yaml; keep copies identical.
+        """The gateway serves srcs/api-gateway/openapi.yaml; keep copies identical.
 
         The Dockerfile copies the srcs/ copy into the image while this suite reads
         the repository-root copy. If they drift, the suite would validate a
         specification that no evaluator ever sees.
         """
         root_spec = os.path.join(REPO_ROOT, "openapi.yaml")
-        served_spec = os.path.join(REPO_ROOT, "srcs", "api-gateway-app", "openapi.yaml")
+        served_spec = os.path.join(REPO_ROOT, "srcs", "api-gateway", "openapi.yaml")
         self.assertTrue(os.path.isfile(served_spec), f"gateway spec not found at {served_spec}")
 
         with open(root_spec, "r", encoding="utf-8") as f:
@@ -194,7 +194,7 @@ class TestOpenAPISpecification(unittest.TestCase):
         self.assertEqual(
             root_content,
             served_content,
-            "openapi.yaml and srcs/api-gateway-app/openapi.yaml have drifted apart",
+            "openapi.yaml and srcs/api-gateway/openapi.yaml have drifted apart",
         )
 
 

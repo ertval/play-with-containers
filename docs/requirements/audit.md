@@ -38,7 +38,7 @@ billing-database     ... done
 inventory-app        ... done
 billing-app          ... done
 RabbitMQ             ... done
-api-gateway-app      ... done
+api-gateway          ... done
 <...>
 user:~$
 ```
@@ -83,7 +83,7 @@ CONTAINER ID   IMAGE            COMMAND CREATED STATUS         PORTS            
 <...>       inventory-app           <...> <...> <...>          8080/tcp                              inventory-app
 <...>       billing-app             <...> <...> <...>          8080/tcp                              billing-app
 <...>       RabbitMQ                <...> <...> <...>          5672/tcp                              RabbitMQ
-<...>       api-gateway-app         <...> <...> <...>         0.0.0.0:3000->3000/tcp, :::3000->3000/tcp  api-gateway-app
+<...>       api-gateway             <...> <...> <...>         0.0.0.0:3000->3000/tcp, :::3000->3000/tcp  api-gateway
 user:~$
 ```
 
@@ -92,7 +92,7 @@ user:~$
 - `inventory-app container` is a Node.js server that contains your inventory-app. It will be connected to the inventory database and accessible via port `8080`.
 - `billing-app container` is a Node.js server that contains your billing-app. It will be connected to the billing database and consuming the messages from the RabbitMQ queue. It will be accessible via port `8080`.
 - `rabbit-queue` is a RabbitMQ server that contains the queue.
-- `api-gateway-app container` is a Node.js server that contains your api-gateway-app. It will forward the requests to the other services and it's accessible via port `3000`.
+- `api-gateway container` is a Node.js server that contains your api-gateway. It will forward the requests to the other services and it's accessible via port `3000`.
 
 ##### Check the Container restart policy:
 
@@ -113,13 +113,13 @@ user:~$ docker volume ls
 DRIVER    VOLUME NAME
 <...>     inventory-database
 <...>     billing-database
-<...>     api-gateway-app
+<...>     api-gateway
 user:~$
 ```
 
 - `inventory-database volume` contains the inventory database.
 - `billing-database volume` contains the billing database.
-- `api-gateway-app volume` contains the API gateway logs.
+- `api-gateway volume` contains the API gateway logs.
 
 ###### Do all volumes have the correct configuration?
 
@@ -133,7 +133,7 @@ user:~$
 
 #### Check the solution network:
 
-###### Is the connection to the api-gateway-app the only one exposed from outside of the Docker host?
+###### Is the connection to the api-gateway the only one exposed from outside of the Docker host?
 
 ##### Ask the following questions to the group or student
 
@@ -153,7 +153,7 @@ billing-database       <...>          <...>         <...>          <...>
 inventory-app          <...>          <...>         <...>          <...>
 billing-app            <...>          <...>         <...>          <...>
 RabbitMQ               <...>          <...>         <...>          <...>
-api-gateway-app        <...>          <...>         <...>          <...>
+api-gateway            <...>          <...>         <...>          <...>
 user:~$
 ```
 

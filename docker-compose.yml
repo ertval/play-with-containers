@@ -124,10 +124,10 @@ services:
       rabbit-queue:
         condition: service_healthy
 
-  api-gateway-app:
-    build: ./srcs/api-gateway-app
-    image: api-gateway-app
-    container_name: api-gateway-app
+  api-gateway:
+    build: ./srcs/api-gateway
+    image: api-gateway
+    container_name: api-gateway
     restart: on-failure
     stop_grace_period: 20s
     ports:
@@ -142,7 +142,7 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
     volumes:
-      - api-gateway-app:/usr/src/logs
+      - api-gateway:/usr/src/logs
     networks:
       - pwc-network
     depends_on:
@@ -164,6 +164,6 @@ volumes:
     name: inventory-database
   billing-database:
     name: billing-database
-  api-gateway-app:
-    name: api-gateway-app
+  api-gateway:
+    name: api-gateway
 

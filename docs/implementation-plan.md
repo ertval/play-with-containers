@@ -23,9 +23,9 @@ correctness and completeness.
 |---|---|---|
 | Base image for ALL Dockerfiles | `alpine:3.23` (explicit tag, never `latest`; base-digest comment above each FROM for provenance) | Alpine 3.24 is latest stable branch (2026-06); 3.23 is penultimate stable. Only Alpine/Debian bases allowed. Pre-submission checklist re-validates against alpinelinux.org (v3.25 would shift penultimate → bump tag). |
 | SQL engine | PostgreSQL 17 (`postgresql17` from Alpine v3.23 repos; port 5432 internal) | Ships in 3.23 main repo (verified via pkgs.alpinelinux.org); mature stable major. Throwaway-container probe confirms binaries exist before real builds. |
-| Services / images / containers | `inventory-database`, `billing-database`, `inventory-app`, `billing-app`, `rabbit-queue`, `api-gateway-app` (`image:` == service name == `container_name`) | Matches audit `docker ps`. Uppercase `RabbitMQ` in audit sample is illegal as OCI repository name → lowercase, justified in README decision table. |
-| Named volumes | `inventory-database`, `billing-database`, `api-gateway-app` (exact bare names via `name:` override) | Audit `docker volume ls` expects literal names. |
-| Exposed ports | ONLY `3000:3000` published on `api-gateway-app`; others `EXPOSE` only (5432 ×2, 8080 ×2, 5672 + 15672) | Outside access only via gateway:3000. Internal reachability proven by exec probe (§5 step 10). |
+| Services / images / containers | `inventory-database`, `billing-database`, `inventory-app`, `billing-app`, `rabbit-queue`, `api-gateway` (`image:` == service name == `container_name`) | Matches audit `docker ps`. Uppercase `RabbitMQ` in audit sample is illegal as OCI repository name → lowercase, justified in README decision table. |
+| Named volumes | `inventory-database`, `billing-database`, `api-gateway` (exact bare names via `name:` override) | Audit `docker volume ls` expects literal names. |
+| Exposed ports | ONLY `3000:3000` published on `api-gateway`; others `EXPOSE` only (5432 ×2, 8080 ×2, 5672 + 15672) | Outside access only via gateway:3000. Internal reachability proven by exec probe (§5 step 10). |
 | Network | One bridge network `play-with-containers-network` | Managed by compose. |
 | Restart policy | `restart: on-failure` ×6 → inspects as exactly `{on-failure 0}` | Matches audit verbatim. |
 | Secrets | `.env` root-only; `.env.example` committed; nothing hardcoded. Doctrine: changing credentials after first init requires `make clean` (volume wipe) or in-place `ALTER ROLE` | Roles bake into volume at initdb; documented to avoid evaluator confusion. |
@@ -46,7 +46,7 @@ Reference-solution violations we deliberately fix: `python:3.12-alpine`
                           host port 3000 (only published port)
                                │
                      ┌─────────▼─────────┐
-      HTTP (any verb) │   api-gateway-app  │── publish JSON ──►  ┌──────────────┐
+      HTTP (any verb) │   api-gateway  │── publish JSON ──►  ┌──────────────┐
        proxy /api/*   │  (Flask + waitress)│      AMQP 5672      │ rabbit-queue │
                 ┌─────┴────────────────────┘ ◄────────────────────│  (RabbitMQ)  │
                 │                                                 └──────────────┘
@@ -60,7 +60,7 @@ Reference-solution violations we deliberately fix: `python:3.12-alpine`
       ┌─────────▼─────────┐                                   ┌────────▼────────┐
       │ inventory-database│ (volume: inventory-database)      │ billing-database│ (volume: billing-database)
       └───────────────────┘                                   └─────────────────┘
-        all on one bridge network; gateway logs volume → api-gateway-app
+        all on one bridge network; gateway logs volume → api-gateway
 ```
 
 Queue semantics satisfy audit resilience check: gateway always answers 200
@@ -84,7 +84,7 @@ play-with-containers/
 ├── scripts/
 │   └── test_audit.sh              # machine-checkable audit assertions (bonus)
 └── srcs/
-    ├── api-gateway-app/{Dockerfile, requirements.txt, server.py,
+    ├── api-gateway/{Dockerfile, requirements.txt, server.py,
     │                    app/{__init__.py, proxy.py, queue_sender.py}}
     ├── inventory-app/{Dockerfile, requirements.txt, server.py,
     │                  app/{__init__.py, extensions.py, movies.py}}
@@ -140,7 +140,7 @@ play-with-containers/
    ack; malformed/poison message → log + ack (no infinite nack-requeue spin);
    transient DB error → log + leave unacked (redelivered later) but count
    redeliveries and cap before log+ack+skip. server.py creates schema first.
-7. **api-gateway-app** — proxy bp (env-driven INVENTORY_APP_HOST/PORT,
+7. **api-gateway** — proxy bp (env-driven INVENTORY_APP_HOST/PORT,
    method/query/body/status passthrough) + `/api/billing/` POST (JSON-required
    → publish stringified body → `{"message": "... sent"}, 200`);
    queue_sender uses pika PlainCredentials env vars, durable declare+publish;
@@ -172,13 +172,13 @@ play-with-containers/
 11. **scripts/test_audit.sh (machine-checkable)** — assertions:
     - 6× `docker inspect -f "{{ .HostConfig.RestartPolicy }}"` == `{on-failure 0}`
     - `docker volume ls --format` yields exactly {inventory-database,
-      billing-database, api-gateway-app}
+      billing-database, api-gateway}
     - `docker ps --format '{{.Names}} {{.Ports}}'` shows exactly ONE published
       mapping (gateway 3000)
     - movies POST → 200 → GET shows created record (both slash spellings)
     - stop billing-app → POST billing → 200 → start → row lands in orders
     - external isolation: curl to :5432/:8080/:5672 refused from host
-    - internal reachability: `docker exec api-gateway-app wget -qO-
+    - internal reachability: `docker exec api-gateway wget -qO-
       http://inventory-app:8080/api/movies` succeeds (proves 8080/5432
       accessible inside network per subject wording)
     Harness gated on `docker-compose up --wait --wait-timeout 180` so hangs are
@@ -341,10 +341,10 @@ services:
       rabbit-queue:
         condition: service_started   # consumer loops/retries internally
 
-  api-gateway-app:
-    build: ./srcs/api-gateway-app
-    image: api-gateway-app
-    container_name: api-gateway-app
+  api-gateway:
+    build: ./srcs/api-gateway
+    image: api-gateway
+    container_name: api-gateway
     restart: on-failure
     ports:
       - "3000:3000"             # ONLY published port in the whole project
@@ -358,7 +358,7 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       RABBITMQ_QUEUE: ${RABBITMQ_QUEUE}
     volumes:
-      - api-gateway-app:/usr/src/logs
+      - api-gateway:/usr/src/logs
     networks: [pwc-network]
     depends_on:
       inventory-app:
@@ -376,8 +376,8 @@ volumes:
     name: inventory-database
   billing-database:
     name: billing-database
-  api-gateway-app:
-    name: api-gateway-app
+  api-gateway:
+    name: api-gateway
 ```
 
 Binding properties of this draft: exactly one `ports:` mapping project-wide;

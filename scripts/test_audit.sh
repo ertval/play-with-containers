@@ -88,7 +88,7 @@ DOCKER_COMPOSE="docker compose"
 log_info "Ensuring infrastructure is up..."
 $DOCKER_COMPOSE up -d --wait --wait-timeout 240
 
-SERVICES=("inventory-database" "billing-database" "rabbit-queue" "inventory-app" "billing-app" "api-gateway-app")
+SERVICES=("inventory-database" "billing-database" "rabbit-queue" "inventory-app" "billing-app" "api-gateway")
 
 echo ""
 echo "--- 1. Verification of Containers and Image Names ---"
@@ -115,7 +115,7 @@ done
 echo ""
 echo "--- 3. Verification of Named Volumes ---"
 VOLUMES=$(docker volume ls --format '{{.Name}}')
-EXPECTED_VOLUMES=("inventory-database" "billing-database" "api-gateway-app")
+EXPECTED_VOLUMES=("inventory-database" "billing-database" "api-gateway")
 for v in "${EXPECTED_VOLUMES[@]}"; do
     if echo "$VOLUMES" | grep -qx "$v"; then
         log_pass "Volume '$v' exists with exact name"
@@ -127,15 +127,15 @@ done
 echo ""
 echo "--- 4. Verification of Port Exposure and Isolation ---"
 # Only 3000 should be mapped on host
-PUBLISHED_PORTS=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep -E 'inventory-database|billing-database|rabbit-queue|inventory-app|billing-app|api-gateway-app' | grep -E '0\.0\.0\.0|::' || true)
+PUBLISHED_PORTS=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep -E 'inventory-database|billing-database|rabbit-queue|inventory-app|billing-app|api-gateway' | grep -E '0\.0\.0\.0|::' || true)
 echo "Published ports across project containers:"
 echo "$PUBLISHED_PORTS"
 
-GATEWAY_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep "api-gateway-app" || true)
-OTHER_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep -v "api-gateway-app" || true)
+GATEWAY_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep "api-gateway" || true)
+OTHER_PUBLISHED=$(echo "$PUBLISHED_PORTS" | grep -v "api-gateway" || true)
 
 if echo "$GATEWAY_PUBLISHED" | grep -q "3000->3000" && [ -z "$OTHER_PUBLISHED" ]; then
-    log_pass "Only api-gateway-app published port 3000 on host"
+    log_pass "Only api-gateway published port 3000 on host"
 else
     log_fail "Port publication check failed: unexpected exposed ports found ($PUBLISHED_PORTS)"
 fi
@@ -157,7 +157,7 @@ done
 # reachable, which proves they are exposed to containers and not to the host.
 for target in "inventory-database:5432" "billing-database:5432" "rabbit-queue:5672"; do
     host="${target%%:*}"; port="${target##*:}"
-    if docker exec api-gateway-app python3 -c "
+    if docker exec api-gateway python3 -c "
 import socket, sys
 s = socket.socket()
 s.settimeout(3)
@@ -171,9 +171,9 @@ done
 
 echo ""
 echo "--- 5. Internal Network Connectivity ---"
-if docker exec api-gateway-app python3 -c "import urllib.request; urllib.request.urlopen('http://inventory-app:8080/health')" >/dev/null 2>&1 || \
-   docker exec api-gateway-app wget -qO- http://inventory-app:8080/health >/dev/null 2>&1; then
-    log_pass "Internal communication (api-gateway-app -> inventory-app:8080) OK"
+if docker exec api-gateway python3 -c "import urllib.request; urllib.request.urlopen('http://inventory-app:8080/health')" >/dev/null 2>&1 || \
+   docker exec api-gateway wget -qO- http://inventory-app:8080/health >/dev/null 2>&1; then
+    log_pass "Internal communication (api-gateway -> inventory-app:8080) OK"
 else
     log_fail "Internal communication between containers failed"
 fi
@@ -334,7 +334,7 @@ fi
 
 echo ""
 echo "--- 8. Verification of Persistent Volume Logs ---"
-LOG_EXISTS=$(docker exec api-gateway-app ls -l /usr/src/logs/gateway.log 2>/dev/null || true)
+LOG_EXISTS=$(docker exec api-gateway ls -l /usr/src/logs/gateway.log 2>/dev/null || true)
 if [ -n "$LOG_EXISTS" ]; then
     log_pass "Gateway log file exists at /usr/src/logs/gateway.log on named volume"
 else

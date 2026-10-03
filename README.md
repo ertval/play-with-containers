@@ -10,7 +10,7 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
                           Host Port 3000 (Only Published Port)
                                            │
                                  ┌─────────▼─────────┐
-                  HTTP /api/*    │  api-gateway-app  │── Publish AMQP ──►  ┌──────────────┐
+                  HTTP /api/*    │  api-gateway  │── Publish AMQP ──►  ┌──────────────┐
                  (Proxy Routing) │ (Flask + Waitress)│    (Port 5672)      │ rabbit-queue │
                                  └─────────┬─────────┘ ◄───────────────────│  (RabbitMQ)  │
                                            │                               └──────────────┘
@@ -28,14 +28,14 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
                                  [Vol: inventory-database]                [Vol: billing-database]
 
    ─── Single Bridge Network: play-with-containers-network (All services internal except Gateway) ───
-   ─── Gateway Log Volume: api-gateway-app mounted at /usr/src/logs ────────────────────────────────
+   ─── Gateway Log Volume: api-gateway mounted at /usr/src/logs ────────────────────────────────
 ```
 
 ### Microservices Summary
 
 | Service Name | Base Image | Internal Port(s) | Published Host Port | Volume Mount | Purpose |
 |---|---|---|---|---|---|
-| `api-gateway-app` | `alpine:3.23` | 3000 | **3000:3000** | `api-gateway-app:/usr/src/logs` | Central reverse proxy, billing message producer, OpenAPI docs |
+| `api-gateway` | `alpine:3.23` | 3000 | **3000:3000** | `api-gateway:/usr/src/logs` | Central reverse proxy, billing message producer, OpenAPI docs |
 | `inventory-app` | `alpine:3.23` | 8080 | *None* | *None* | REST API for movie catalogue CRUD |
 | `billing-app` | `alpine:3.23` | 8080 | *None* | *None* | Asynchronous consumer worker storing orders into database |
 | `rabbit-queue` | `alpine:3.23` | 5672, 15672 | *None* | *None* | Message broker buffering durable billing queues |
@@ -50,8 +50,8 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 - **Strict Network Isolation**: Only the API Gateway publishes port `3000` to the host. Databases (5432), message broker (5672), and internal apps (8080) are strictly unexposed to the host and communicate exclusively over the internal `play-with-containers-network` bridge network.
 - **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Every application and the gateway depend on `service_healthy`, not `service_started`, so no container is reachable before the services behind it can actually answer. Combined with bounded retry loops in each application (30 attempts × 2 s for PostgreSQL, 5 attempts for RabbitMQ publishes) this removes the cold-boot race entirely: the first request after `docker compose up` returns `200`, not `502`.
 - **Asynchronous Queue Buffering**: When the `billing-app` is stopped or undergoing maintenance, the API Gateway continues accepting orders and returns HTTP `200`. RabbitMQ safely buffers messages in durable storage, and the gateway uses publisher confirms so a `200` means the broker actually accepted and persisted the message. As soon as `billing-app` restarts, buffered orders are consumed and inserted into PostgreSQL. An order the consumer could not persist is `nack`ed and requeued rather than acknowledged, so a failed insert is never silently dropped.
-- **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway-app`). The database entrypoints run `initdb` only when the data directory is empty, and reconcile the configured role and database credentials on every boot, so rotating a password in `.env` takes effect on the next `docker compose up`.
-- **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to `stdout` (for `docker compose logs`) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway-app`).
+- **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway`). The database entrypoints run `initdb` only when the data directory is empty, and reconcile the configured role and database credentials on every boot, so rotating a password in `.env` takes effect on the next `docker compose up`.
+- **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to `stdout` (for `docker compose logs`) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway`).
 - **Standard Restart Policy**: All containers enforce `restart: on-failure` (inspects as `{on-failure 0}`), ensuring automated recovery from transient failures. An explicit `docker stop` still exits `0` and is respected, because only a non-zero exit triggers the policy.
 - **Graceful Shutdown**: Every service handles `SIGTERM` and exits `0` on `docker stop` rather than being `SIGKILL`ed after the grace period. `billing-app` drains its AMQP channel so an unacknowledged message is requeued, and the database images ship `STOPSIGNAL SIGINT` because PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients to disconnect.
 - **Least Privilege & Secret Hygiene**: The three Python services run as a non-root `app` user; only the database and broker images start as root, and they immediately drop to `postgres`/`rabbitmq` via `su-exec`. No secret is baked into any image layer, none is passed as a command-line argument (`psql` and `rabbitmqctl` receive it via a `0600` file and stdin respectively), and the application raises rather than falling back to a hardcoded default if a secret is missing.
@@ -387,8 +387,8 @@ The API Gateway hosts an embedded Swagger UI documentation explorer:
 |---|---|---|---|
 | **Base Image** | `alpine:3.23` | Penultimate stable version of Alpine Linux (Alpine 3.24 is current stable). Guarantees reproducible, lightweight musl packages. | Subject §Instructions: *"containers should be created from the penultimate stable version of either Alpine or Debian"*. |
 | **SQL Engine** | PostgreSQL 17 | Stable relational DBMS available in Alpine 3.23 official repositories. | Subject §Docker Containers: *"SQL database server that contains your inventory/billing database"*. |
-| **Container & Image Naming** | `inventory-database`, `billing-database`, `inventory-app`, `billing-app`, `rabbit-queue`, `api-gateway-app` | OCI repository names require lowercase characters. Service name, image name, and container name are set identically. | Audit §Docker Containers: Container name matching. Subject §Instructions: *"service and Docker image must share the same name"*. |
-| **Volume Names** | `inventory-database`, `billing-database`, `api-gateway-app` | Docker Compose `name:` volume overrides generate exact bare names without project prefix. | Audit §Check the Docker volumes: `docker volume ls` expects literal names. |
+| **Container & Image Naming** | `inventory-database`, `billing-database`, `inventory-app`, `billing-app`, `rabbit-queue`, `api-gateway` | OCI repository names require lowercase characters. Service name, image name, and container name are set identically. | Audit §Docker Containers: Container name matching. Subject §Instructions: *"service and Docker image must share the same name"*. |
+| **Volume Names** | `inventory-database`, `billing-database`, `api-gateway` | Docker Compose `name:` volume overrides generate exact bare names without project prefix. | Audit §Check the Docker volumes: `docker volume ls` expects literal names. |
 | **POST Status Code** | `200 OK` | Handlers return HTTP 200 upon successful creation and queue enqueueing. | Audit §Inventory & §Billing: *"Can you confirm the response was the success code 200?"* |
 | **Restart Policy** | `restart: on-failure` | Inspects verbatim as `{on-failure 0}` on all 6 containers. | Audit §Check Container restart policy: `docker inspect -f "{{ .HostConfig.RestartPolicy }}"` == `{on-failure 0}`. |
 | **Port Exposure** | Only `3000:3000` published on host | All internal ports (5432, 8080, 5672) use `expose:` and remain unreachable from host network. | Subject §Docker Network & Audit §Check the solution network. |
