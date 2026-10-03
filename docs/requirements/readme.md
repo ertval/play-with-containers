@@ -1,6 +1,5 @@
 ## play-with-containers
 
-![Microservices](./resources/Microservices.png)
 
 ### Objectives
 
@@ -47,7 +46,6 @@ You have to install Docker in your Linux virtual machine, you will also need it
 in the audit.
 
 You have to implement this architecture:
-![architecture](./resources/play-with-containers-py.png)
 
 You will use the services described in the `crud-master` project.
 [Here](https://github.com/01-edu/crud-master-py)

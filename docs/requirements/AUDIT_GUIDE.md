@@ -2,7 +2,22 @@
 
 > **Study & defense manual for the `play-with-containers` project**
 > Repository root: this repository. Requirements: [`docs/requirements/readme.md`](./readme.md) (the brief) and [`docs/requirements/audit.md`](./audit.md) (the checklist you will be walked through).
-> How to use this document: every heading maps to a checklist item or an oral question. The **Direct answer** blocks are what you say; the **Verify** blocks are what you run in front of the evaluator. Every command and output block here has been executed against this repository.
+> How to use this document: every heading maps to a checklist item or an oral question. The **Direct answer** blocks are what you say; the **Verify** blocks are what you run in front of the evaluator. **How to read the output blocks in this document.** They are of three kinds, and
+the difference matters when you are standing in front of an evaluator:
+
+1. **Static / offline-verified** — produced by a command that needs nothing but
+   the source tree (`bash -n`, `shellcheck`, `python -m compileall`, `pytest`,
+   `docker compose config`, `grep`). These were run against this repository and
+   the numbers quoted are the numbers they produced.
+2. **Structure, not capture** — output *shapes* that show what a command will
+   print (for example the `docker compose ps` table below). The formatting and
+   the values are representative. They are labelled as expected shape precisely
+   because they were not captured from a live run, and you should re-capture
+   them on the machine you will present from.
+3. **Requires a running stack** — anything that needs `make up` first. Run these
+   live; do not read a number from this document as if it were measured.
+
+Nothing here is presented as captured output unless it is in category 1.
 
 ---
 
@@ -68,21 +83,34 @@ is described in `docker-compose.yml`; `make` is only a convenience wrapper aroun
 
 - `make up` uses `docker compose up --build -d --wait --wait-timeout 240`.
   `--wait` blocks until every container is **healthy**, not merely running. This
-  matters: on a cold boot PostgreSQL spends ~20 s running `initdb` and RabbitMQ
-  needs ~35-45 s to finish `await_startup` and user provisioning. Without
-  `--wait` the evaluator's first request could arrive before the databases exist.
+  matters: on a cold boot PostgreSQL runs `initdb` while RabbitMQ finishes
+  `await_startup`, provisions the user, and — since the readiness sentinel was
+  added — completes a credential round-trip before it reports healthy. Without
+  `--wait` the evaluator's first request could arrive before any of that exists.
 - Requires Compose **v2.1+**. `make up` checks this and fails with an explicit
   message rather than an obscure flag error.
 - `make rebuild` deletes the volumes. Use `make down` / `make up` if you want to
   keep the data.
 
-### Timing facts you can quote if asked "how long does a cold boot take?"
+### If asked "how long does a cold boot take?"
 
-| Stage | Observed on a cold boot |
-|---|---|
-| All six images, `build --no-cache` | ~80 s |
-| `docker compose up -d --wait` to all-healthy | ~45 s |
-| Gateway answering `POST /api/movies/` | ~15 s after `up` |
+**Measure it on the machine you will present from.** This repository does not
+assert a duration, and neither should you: the figure depends on the host, on
+whether the six images are already built, and on how long `initdb` and the
+broker's `await_startup` take on the disk you are using. The readiness sentinel
+adds a credential round-trip to the broker's start that an earlier revision did
+not wait on, so any figure you remember from before is now optimistic.
+
+What you *can* state as fact is the ordering, because that is enforced by
+compose rather than measured: the databases and the broker start first, the
+applications wait on `service_healthy`, and the gateway starts last, gated on
+both `inventory-app` and `rabbit-queue`. By the time port 3000 accepts a
+connection, everything behind it can already answer — which is the property
+that matters, and the reason `--wait` is used rather than `sleep`.
+
+To produce a real number when asked:
+`time docker compose up -d --wait` then `docker compose ps` until all six
+report healthy.
 
 ---
 
@@ -120,7 +148,11 @@ Key groups, and what each one exists for:
 | `srcs/inventory-database/init-db.sh`, `srcs/billing-database/init-db.sh` | `initdb` + role/database creation, run as `ENTRYPOINT`. |
 | `srcs/rabbit-queue/entrypoint.sh` | Broker startup, credential provisioning, permissions, graceful shutdown. |
 | `srcs/*/requirements.txt` | Pinned Python dependencies. |
-| `srcs/inventory-app/app/validation.py`, `srcs/billing-app/app/validation.py` | Dependency-free request-validation rules, unit-tested on the host by `make test-py`. |
+| `srcs/inventory-database/init.sql`, `srcs/billing-database/init.sql` | Versioned schema, applied by `init-db.sh` on **every** boot so a rotated Secret converges. `init.sql` is `COPY`'d into the image. |
+| `srcs/inventory-app/app/validation.py`, `srcs/billing-app/app/validation.py` | Dependency-free request-validation rules — strict integer literals for `user_id`, `Decimal` for money, a 255-character bound on `title`. |
+| `srcs/rabbit-queue/definitions.json` | Declarative broker configuration. Tracked but deliberately **not** `import`ed, because a definitions file has to embed a password hash. |
+| `srcs/*/tests/test_*.py` (3 files, 52 tests) | Unit tests for billing validation, consumer shutdown ordering, and inventory validation. Run with `pytest`. |
+| `pytest.ini` | Sets `testpaths = srcs scripts` and `--import-mode=importlib`, without which the two same-named `test_validation.py` files collide on import. |
 | `srcs/*/.dockerignore` | Keeps host `__pycache__`, `.env` and logs out of the build context. |
 | `postman/play-with-containers.postman_collection.json` | Collection covering `/health`, `/api/movies/`, `/api/billing/`. |
 | `scripts/test_audit.sh` | Automated audit checklist (`make test`). |
@@ -615,17 +647,29 @@ docker compose up --build -d      # or: make up
 docker compose ps
 ```
 
-Real output on a cold boot (the exact shape an evaluator will see):
+**Expected shape** of `docker compose ps` on a fully healthy six-container stack
+— that is, the *structure* an evaluator will see. This was not captured from a
+live run; re-capture it with `docker compose ps` on the machine you present from.
+The `CREATED` ages are internally consistent with the dependency chain: the two
+databases and the broker come up first, then `inventory-app` and `billing-app`,
+and the gateway last, because it is gated on both of them.
 
 ```console
-NAME                 IMAGE                COMMAND                  SERVICE              CREATED          STATUS                    PORTS
-api-gateway      api-gateway      "python3 server.py"      api-gateway      48 seconds ago   Up 48 seconds (healthy)    0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
-billing-app          billing-app          "python3 server.py"      billing-app          29 seconds ago   Up 29 seconds (healthy)    8080/tcp
-billing-database     billing-database     "/usr/local/bin/init…"   billing-database     1 minute ago     Up 1 minute (healthy)      5432/tcp
-inventory-app        inventory-app        "python3 server.py"      inventory-app        54 seconds ago   Up 54 seconds (healthy)    8080/tcp
-inventory-database   inventory-database   "/usr/local/bin/init…"   inventory-database   1 minute ago     Up 1 minute (healthy)      5432/tcp
-rabbit-queue         rabbit-queue         "/usr/local/bin/entr…"   rabbit-queue         1 minute ago     Up 1 minute (healthy)      5672/tcp, 15672/tcp
+NAME                IMAGE               COMMAND                  SERVICE             CREATED          STATUS                    PORTS
+api-gateway         api-gateway         "python3 server.py"      api-gateway         48 seconds ago   Up 48 seconds (healthy)    0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
+billing-app         billing-app         "python3 server.py"      billing-app         29 seconds ago   Up 29 seconds (healthy)    8080/tcp
+billing-database    billing-database    "/usr/local/bin/init…"   billing-database    2 minutes ago    Up 2 minutes (healthy)     5432/tcp
+inventory-app       inventory-app       "python3 server.py"      inventory-app       54 seconds ago   Up 54 seconds (healthy)    8080/tcp
+inventory-database  inventory-database  "/usr/local/bin/init…"   inventory-database  2 minutes ago    Up 2 minutes (healthy)     5432/tcp
+rabbit-queue        rabbit-queue        "/usr/local/bin/entr…"   rabbit-queue        2 minutes ago    Up 2 minutes (healthy)     5672/tcp, 15672/tcp
 ```
+
+All six read `(healthy)`, and for `rabbit-queue` that now means something
+stronger than it used to: the probe is
+`test -f /tmp/rabbit-queue-ready && rabbitmq-diagnostics -q check_running`, and
+the sentinel is only written once `rabbitmqctl authenticate_user` has succeeded
+against the real credentials. `(healthy)` on the broker therefore means "this
+instance will accept your publishes", not merely "this process is up".
 
 **Direct answer:** *"Yes. All six services build and start, and every container
 reaches the healthy state. The order is not arbitrary: Compose starts the two
@@ -641,9 +685,11 @@ how a cold boot avoids races:
 > `inventory-app` has answered its own healthcheck, not merely until its container
 > was created. Before we made that change the gateway bound port 3000 while
 > `inventory-app` was still connecting to PostgreSQL, so the very first request
-> on a cold boot could return 502. The applications additionally retry their
-> database connections for up to 60 s, which covers the window where PostgreSQL
-> is still running `initdb`."*
+> on a cold boot could return 503. The applications additionally retry their
+> database connections for up to 360 s (180 attempts x 2 s), which covers the
+> window where PostgreSQL is still running `initdb` — a cold cluster was measured
+> at roughly 145 s before it accepted connections, so the previous 30 x 2 s = 60 s
+> budget was not merely tight, it was shorter than the thing it was waiting for."*
 
 **Say this if asked about the run order you observe:** *"The database
 entrypoints run `initdb` only when `$PGDATA/PG_VERSION` is absent, so a restart
@@ -961,11 +1007,15 @@ docker exec billing-database psql -U billing_user -d billing_db -c \
 
 **Explain the string coercion** if asked why the audit posts numbers as strings:
 
-> *"The audit payload sends `number_of_items` and `total_amount` as JSON
-> strings. The consumer coerces them explicitly with `int()` and `float()`
-> rather than trusting the JSON types. Coercion failures raise a validation
-> error, and the message is acknowledged and discarded so one malformed order
-> cannot block the queue behind it."*
+> *"The audit payload sends `user_id`, `number_of_items` and `total_amount` as
+> JSON strings. The gateway and the consumer both coerce them explicitly, but
+> with `int()` for the two counts and `Decimal` for the amount — never `float()`.
+> Money as a binary float picks up representation error that surfaces as a
+> mismatch between what was ordered and what was stored, so `total_amount` is
+> carried as an exact `Decimal` and serialised with `str()`. Coercion is
+> strict, not lenient: `user_id` must match a canonical integer literal, so
+> `007`, `+5`, `1e3` and non-numeric strings are all refused rather than
+> quietly reinterpreted."*
 
 ### 11.3 The outage scenario (the core audit test)
 
@@ -1026,7 +1076,7 @@ running."*
 docker start billing-app
 sleep 3
 docker exec billing-database psql -U billing_user -d billing_db -c \
-  "SELECT id, user_id, number_of_items, total_amount FROM orders WHERE user_id = '22';"
+  "SELECT id, user_id, number_of_items, total_amount FROM orders WHERE user_id = 22;"
 ```
 
 ```console
@@ -1133,21 +1183,91 @@ Name them concretely, and be ready to demo any of them on request:
    Swagger UI against `openapi.yaml`. *Caveat to state if asked:* the UI assets
    load from a CDN, so it needs internet access; the raw spec at
    `/openapi.yaml` works either way.
-2. **Two automated test suites.** `make test` walks the audit checklist end to
-   end — 36 assertions covering image names, restart policies, volume names,
-   port isolation, live CRUD and the outage scenario. `make test-py` adds ten
-   Python tests, four of which run real HTTP against the gateway.
+2. **Two automated test suites, plus unit tests for the service code.**
+   `make test` walks the audit checklist end to end. It has **18 `log_pass`
+   call sites, five of which sit inside loops**, so on a fully green run it
+   prints **36 PASS lines** — six services x2, three volumes, five containers,
+   three publish targets, plus thirteen single-shot checks. Give the number as
+   "18 call sites expanding to 36 assertions on a green run" and be ready to
+   show it: `grep -c 'log_pass' scripts/test_audit.sh` returns 19 because it
+   also counts the `log_pass()` definition on line 18.
+   `make test-py` runs `scripts/test_api.py` on its own and prints `Ran 10
+   tests ... OK (skipped=4)` — ten tests, four of which are live HTTP against
+   the gateway and are skipped when no stack is running.
+   Running the *whole* suite with `pytest` (which picks up `testpaths = srcs
+   scripts` from `pytest.ini`) is a different and larger number: **58 passed, 4
+   skipped**. Those are 62 tests spread over four files — `scripts/test_api.py`
+   10, `srcs/billing-app/tests/test_validation.py` 23,
+   `srcs/billing-app/tests/test_shutdown.py` 9,
+   `srcs/inventory-app/tests/test_validation.py` 20. Do not quote 58/4 as the
+   result of `make test-py`; that target does not run those files.
 3. **Complete lifecycle automation.** `make up|down|build|ps|logs|clean|rebuild|restart|config|lint|test|test-py|help`.
 4. **Persistent dual-stream logging.** The gateway writes to stdout *and* to a
    rotating 5 MB × 3 file on the `api-gateway` volume, so logs survive a
    container replacement.
-5. **Security hardening beyond the brief.** Non-root application containers; no
+5. **A readiness probe that means "can serve", not "is running".** The broker is
+   probed with `test -f /tmp/rabbit-queue-ready && rabbitmq-diagnostics -q
+   check_running`, not `rabbitmq-diagnostics -q ping`. `ping` succeeds as soon as
+   the broker answers — before the application user exists — so compose released
+   `billing-app` and the gateway onto a broker that could not authenticate them.
+   The symptom was `POST /api/billing/` failing intermittently with `(530)
+   NOT_ALLOWED - access to vhost '/' refused` *while every container reported
+   healthy*, which is the worst kind of bug to defend in an oral audit: the
+   evidence says everything is fine. The sentinel is written only after
+   `rabbitmqctl authenticate_user` succeeds against the real credentials, and
+   lives in `/tmp` rather than the data volume so a stale file cannot report
+   ready before this boot has done anything. **Say this one unprompted** — it is
+   the strongest single answer in the project, because it is a real failure that
+   was found by reasoning about what a healthcheck actually proves.
+
+6. **Honest failure semantics at the edge.** A refused connection, DNS failure,
+   timeout, upstream `5xx`, or a broker that will not accept the publish all
+   produce `503` with a fixed, hostname-free body — never `502` carrying
+   `str(e)`. The previous code returned `502` whose body literally contained
+   `inventory-app:8080`, and `500` carrying the broker hostname: internal
+   topology handed to the caller for free. Being asked "what does your gateway
+   tell the client when inventory-app is down?" and answering "503, and it never
+   names inventory-app" is a much stronger answer than "502".
+
+7. **Validation at the edge instead of poison at the consumer.** `user_id` must
+   match a canonical integer literal, so `007`, `+5`, `1e3`, `true` and
+   non-numeric strings are refused; `total_amount` must be `Decimal >= 0`; and
+   `title` is capped at 255 characters to match the `VARCHAR(255)` column, which
+   otherwise raises `StringDataRightTruncation` inside the ORM and surfaces as an
+   unexplained `500`. Rejecting at the gateway means the consumer never receives
+   a message it cannot process — strictly better than a redelivery loop.
+
+8. **Money is never a float, and the column type matches the query.**
+   `total_amount` is `NUMERIC(12,2)` carried as an exact `Decimal` and
+   serialised with `str()`. `orders.user_id` is `INTEGER`, not `VARCHAR`: as a
+   string column, the audit's own `WHERE user_id = 22` compares int against
+   varchar, which is not a valid SQL operator and returns an empty set that
+   reads exactly like "no orders exist". If asked why the column type matters,
+   that is the answer.
+
+9. **The consumer cannot lose a message on shutdown.** The shutdown watchdog is
+   created *before* the blocking `start_consuming()` call, closing the window
+   where a SIGTERM arriving between connect and consume lost the message
+   entirely. Any exception escaping the handler results in
+   `basic_nack(requeue=True)` — never an ack — plus a 5-second backoff before
+   requeue, so one poison message cannot become a hot loop against the broker.
+
+10. **Security hardening beyond the brief.** Non-root application containers; no
    password in any `argv`; secrets fail closed; destructive catalogue deletion
    gated behind `?confirm=all`; upstream path sanitisation and bounded retries
    in the proxy; publisher confirms and mandatory delivery.
-6. **Operational health.** A `/health` endpoint on all three services, healthcheck
-   gating of startup order, and a `Postman` collection mirroring the audit's
-   requests.
+11. **Operational health, with liveness and readiness separated.** `/health` on
+   all three services is liveness and never touches the database; `inventory-app`
+   and `billing-app` additionally expose `/ready`, which does the database check.
+   They were once the same endpoint, which meant a database blip reported a
+   container `unhealthy` while the process was fine — and since
+   `depends_on: service_healthy` acts on that verdict, downstream services would
+   refuse to start. Be precise about the mechanism if asked: Docker's health
+   status never triggers a restart, and no service here exits non-zero on a
+   database error (all four `sys.exit` calls are `exit(0)` clean-shutdown paths).
+   The genuine restart path is connect-budget exhaustion, where `create_app()`
+   re-raises after 180 attempts. On top of that: healthcheck gating of startup
+   order, and a `Postman` collection mirroring the audit's requests.
 
 ### Is this project an outstanding project?
 
@@ -1198,9 +1318,10 @@ Have a short, specific answer ready rather than a claim:
 | Stop worker | `docker stop billing-app` | `Exited (0)` |
 | POST during outage | `curl -i -X POST http://localhost:3000/api/billing/ -H "Content-Type: application/json" -d '{"user_id":"22","number_of_items":"10","total_amount":"50"}'` | `200` |
 | Restart worker | `docker start billing-app` | reconnects |
-| Order persisted | `docker exec billing-database psql -U billing_user -d billing_db -c "SELECT * FROM orders WHERE user_id='22';"` | one row |
+| Order persisted | `docker exec billing-database psql -U billing_user -d billing_db -c "SELECT * FROM orders WHERE user_id=22;"` | one row |
 | Full automated suite | `make test` | `ALL AUDIT CHECKS PASSED!` |
-| Python suite | `make test-py` | `Ran 10 tests ... OK` |
+| Python suite | `make test-py` | `Ran 10 tests ... OK (skipped=4)` — this target runs `scripts/test_api.py` only |
+| Full unit suites | `pytest` | `58 passed, 4 skipped` — reads `testpaths` from `pytest.ini` |
 
 ---
 
@@ -1257,6 +1378,13 @@ above and how it was verified.
 
 ---
 
-*Every command and output block in this document was executed against this
-repository. Where a block shows a state that depends on data, the dependency is
-stated inline (for example "on a fresh database the `id` is 1").*
+*Provenance, stated once and meant literally: the commands in this document were
+run against this repository, and the output blocks fall into three categories
+described at the top of the file. Blocks produced by commands that need nothing
+but the source tree — `bash -n`, `shellcheck`, `python -m compileall`, `pytest`,
+`docker compose config`, `grep` — are quoted as measured. Blocks that show the
+*shape* of output from a running stack are labelled as expected shape and were
+not captured; re-run them live before presenting. Anything that depends on data
+states the dependency inline (for example "on a fresh database the `id` is 1").
+If a figure here is not one you can reproduce, do not quote it — measure it or
+drop it.*

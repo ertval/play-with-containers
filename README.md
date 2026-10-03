@@ -48,12 +48,19 @@ A high-performance, fault-tolerant 6-service microservices infrastructure built 
 
 - **Alpine 3.23 Penultimate Release**: All 6 Docker images are built from `alpine:3.23`, the penultimate stable release of Alpine Linux (ensuring deterministic musl libc builds, small image footprints, and zero dependence on forbidden Docker Hub pre-built application images).
 - **Strict Network Isolation**: Only the API Gateway publishes port `3000` to the host. Databases (5432), message broker (5672), and internal apps (8080) are strictly unexposed to the host and communicate exclusively over the internal `play-with-containers-network` bridge network.
-- **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Every application and the gateway depend on `service_healthy`, not `service_started`, so no container is reachable before the services behind it can actually answer. Combined with bounded retry loops in each application (30 attempts × 2 s for PostgreSQL, 5 attempts for RabbitMQ publishes) this removes the cold-boot race entirely: the first request after `docker compose up` returns `200`, not `502`.
+- **Fail-Safe Startup & Healthchecks**: Database services utilize `pg_isready` health probes. Every application and the gateway depend on `service_healthy`, not `service_started`, so no container is reachable before the services behind it can actually answer. Combined with bounded retry loops in each application (180 attempts × 2 s for PostgreSQL, 2 attempts with a 3 s socket timeout for RabbitMQ publishes) this removes the cold-boot race entirely: the first request after `docker compose up` returns `200`, not `503`.
+- **The readiness probe has to mean "can actually serve", not "is running"**: `rabbit-queue` is probed with `test -f /tmp/rabbit-queue-ready && rabbitmq-diagnostics -q check_running`, not `rabbitmq-diagnostics -q ping`. `ping` succeeds as soon as the broker answers — *before* the application user exists — so compose released `billing-app` and the gateway onto a broker that could not authenticate them, and `POST /api/billing/` failed intermittently with `(530) NOT_ALLOWED - access to vhost '/' refused` while every container reported healthy. The sentinel is written only after `rabbitmqctl authenticate_user` succeeds against the real credentials, and it lives in `/tmp` rather than the data volume so a stale file left by an earlier boot cannot report ready before this one has done anything.
 - **Asynchronous Queue Buffering**: When the `billing-app` is stopped or undergoing maintenance, the API Gateway continues accepting orders and returns HTTP `200`. RabbitMQ safely buffers messages in durable storage, and the gateway uses publisher confirms so a `200` means the broker actually accepted and persisted the message. As soon as `billing-app` restarts, buffered orders are consumed and inserted into PostgreSQL. An order the consumer could not persist is `nack`ed and requeued rather than acknowledged, so a failed insert is never silently dropped.
 - **Persistent Storage & Data Hygiene**: Persistent data is stored in three named Docker volumes (`inventory-database`, `billing-database`, `api-gateway`). The database entrypoints run `initdb` only when the data directory is empty, and reconcile the configured role and database credentials on every boot, so rotating a password in `.env` takes effect on the next `docker compose up`.
 - **Structured Dual-Stream Logging**: The API Gateway writes structured logs simultaneously to `stdout` (for `docker compose logs`) and to a persistent rotating log file at `/usr/src/logs/gateway.log` (mounted to volume `api-gateway`).
 - **Standard Restart Policy**: All containers enforce `restart: on-failure` (inspects as `{on-failure 0}`), ensuring automated recovery from transient failures. An explicit `docker stop` still exits `0` and is respected, because only a non-zero exit triggers the policy.
 - **Graceful Shutdown**: Every service handles `SIGTERM` and exits `0` on `docker stop` rather than being `SIGKILL`ed after the grace period. `billing-app` drains its AMQP channel so an unacknowledged message is requeued, and the database images ship `STOPSIGNAL SIGINT` because PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients to disconnect.
+- **Liveness and readiness are different questions**: `/health` is liveness and never touches the database; `/ready` is readiness and does. They used to be the same endpoint, which meant a database blip reported the container `unhealthy` while the process was perfectly alive — and because `depends_on: service_healthy` acts on that verdict, downstream services would refuse to start and health assertions would fail. Worth being precise about the mechanism during an audit: Docker's health status never triggers a restart, and none of these services exits non-zero on a database error. The genuine restart path is connect-budget exhaustion, where `create_app()` re-raises after 180 attempts.
+- **Dependency failure is reported as 503, never 502, and never with the topology attached**: a refused connection, a DNS failure, a timeout, an upstream `5xx`, or a broker that will not accept the publish all produce `503` with a fixed, hostname-free body. The previous code returned `502` carrying `str(e)`, which literally contained `inventory-app:8080`, and `500` carrying the broker hostname — internal topology handed to the caller for free.
+- **Rejected at the edge rather than poison at the consumer**: `user_id` must match a canonical integer literal (`007`, `+5`, `1e3` and non-numeric strings are all refused), `total_amount` must be a `Decimal >= 0`, and `title` is capped at 255 characters to match the `VARCHAR(255)` column. Exceeding that bound used to raise `StringDataRightTruncation` inside the ORM and surface as an unexplained `500`. Rejecting at the gateway means the consumer never receives a message it cannot process, which is strictly better than a redelivery loop.
+- **Money is never a float**: `total_amount` is `NUMERIC(12,2)` carried as an exact `Decimal` end to end and serialised with `str()`, so no binary rounding error is introduced at the database boundary. Relatedly, `orders.user_id` is `INTEGER`, not `VARCHAR` — as a string column the literal `WHERE user_id = 20` compares int against varchar, which is not a valid SQL operator and returns an empty set that reads exactly like "no orders exist".
+- **TLS available on both ends of the queue, off the same variables**: `RABBITMQ_TLS`, `RABBITMQ_CA_FILE` and `RABBITMQ_TLS_VERIFY` are read by the publisher (`api-gateway`) and the consumer (`billing-app`) alike, so the two ends cannot drift apart. Enabling transport security for one service only is the failure to avoid: the broker would accept the gateway's publishes and leave the consumer reconnecting forever, filling a queue that silently never drains. The default remains plaintext on 5672, which is what this Compose network uses.
+- **The schema is versioned and applied on every boot**: both databases ship an `init.sql` that the entrypoint applies on each start, so a rotated Secret converges instead of leaving a stale schema behind. `initdb` still runs only when the data directory is empty.
 - **Least Privilege & Secret Hygiene**: The three Python services run as a non-root `app` user; only the database and broker images start as root, and they immediately drop to `postgres`/`rabbitmq` via `su-exec`. No secret is baked into any image layer, none is passed as a command-line argument (`psql` and `rabbitmqctl` receive it via a `0600` file and stdin respectively), and the application raises rather than falling back to a hardcoded default if a secret is missing.
 
 ---
@@ -99,9 +106,23 @@ cp .env.example .env
 | `RABBITMQ_QUEUE` | `billing_queue` | Target queue name for order processing |
 | `INVENTORY_APP_HOST` | `inventory-app` | Internal hostname for inventory service |
 | `INVENTORY_APP_PORT` | `8080` | Internal port for inventory service |
+| `DB_CONNECT_MAX_RETRIES` | `180` | PostgreSQL connect attempts before giving up. 180 x 2 s = 360 s, because a cold cluster measures ~145 s before it accepts connections |
+| `DB_CONNECT_RETRY_DELAY` | `2` | Seconds between PostgreSQL connect attempts |
+| `RABBITMQ_SOCKET_TIMEOUT` | `3` | Seconds the publisher waits on the AMQP socket. Bounded so a broker that accepts TCP but never finishes the handshake cannot hold a POST open |
+| `RABBITMQ_PUBLISH_MAX_RETRIES` | `2` | Publish attempts before the gateway answers `503` |
+| `RABBITMQ_RETRY_DELAY` | `1` | Seconds between publish attempts |
+| `REDELIVERY_BACKOFF_SECONDS` | `5` | Pause before requeueing a message the consumer could not persist. Requeueing instantly turns one poison message into a hot loop against the broker |
+| `RABBITMQ_TLS` | *(empty)* | Truthy forces TLS regardless of port. Unset lets the rule below decide |
+| `RABBITMQ_CA_FILE` | *(empty)* | PEM bundle used to verify the broker certificate, as a path **visible inside the container** — mount it. Replaces the system trust store, so include every CA the broker may present |
+| `RABBITMQ_TLS_VERIFY` | `1` | Leave on. Setting it false accepts any certificate, which removes protection against a man-in-the-middle reading the AMQP credentials and queued orders |
 | `GATEWAY_HOST` | `127.0.0.1` | Host the test scripts target. Not read by `docker-compose.yml`. |
 | `GATEWAY_PORT` | `3000` | Port the test scripts target on the gateway |
 
+> **When TLS is on**: `RABBITMQ_TLS` truthy (`1`/`true`/`yes`/`on`), **or** it is
+> unset and either `RABBITMQ_PORT` is `5671` or `RABBITMQ_HOST` starts with
+> `amqps://`. You normally set nothing here — the local broker is plaintext on
+> 5672, so the rule resolves to plaintext and the stack behaves as before.
+>
 > **There is deliberately no `BILLING_APP_*` variable.** The gateway never
 > contacts `billing-app`; it only publishes to RabbitMQ. A `BILLING_APP_HOST` key
 > would misleadingly suggest otherwise.
@@ -172,11 +193,17 @@ docker compose down
 docker compose down -v --remove-orphans
 ```
 
-A cold boot needs roughly 45 seconds: PostgreSQL runs `initdb` (~20 s) and
-RabbitMQ completes `await_startup` plus user provisioning (~35-45 s). Compose
-starts the databases and the broker first, waits for their healthchecks, then
-starts the applications, and starts the gateway last — so by the time port 3000
-accepts a connection, everything behind it can already answer.
+A cold boot is dominated by two things: PostgreSQL running `initdb`, and
+RabbitMQ completing `await_startup` plus user provisioning. Compose starts the
+databases and the broker first, waits for their healthchecks, then starts the
+applications, and starts the gateway last — so by the time port 3000 accepts a
+connection, everything behind it can already answer. That ordering is the
+guarantee; the wall-clock duration is not one this repository asserts. The
+figures depend on the host and on whether the images are already built, and the
+readiness sentinel now adds a credential round-trip to the broker's start that
+an earlier revision did not wait on. Measure it yourself on the machine you will
+present from rather than quoting a number from here: `time docker compose up -d`
+followed by `docker compose ps` until all six report healthy.
 
 ---
 
@@ -193,7 +220,7 @@ accepts a connection, everything behind it can already answer.
 | `make test` reports a port-isolation failure | A previous run left `billing-app` stopped | The suite restarts it on exit; if needed run `docker compose up -d billing-app` |
 | Swagger UI at `/docs` renders blank | The UI assets load from a CDN | Needs internet access. The raw specification at `http://localhost:3000/openapi.yaml` always works |
 | Movies or orders accumulate between test runs | `make test` cleans up after itself, but manual `curl` calls do not | `curl -X DELETE "http://localhost:3000/api/movies?confirm=all"` and `docker compose down -v` to reset |
-| Gateway returns `502` for `/api/movies/` | `inventory-app` is not answering yet, or is down | `docker compose ps` and `docker compose logs inventory-app`. The gateway retries a bounded number of times; a persistent `502` means the upstream is genuinely down |
+| Gateway returns `503` for `/api/movies/` | `inventory-app` is not answering, or is down | `docker compose ps` and `docker compose logs inventory-app`. The gateway retries a bounded number of times; a persistent `503` means the upstream is genuinely down. The body deliberately never names the upstream — a dependency being unavailable is the client's business, the topology that produced it is not |
 
 ---
 
@@ -392,7 +419,7 @@ The API Gateway hosts an embedded Swagger UI documentation explorer:
 | **POST Status Code** | `200 OK` | Handlers return HTTP 200 upon successful creation and queue enqueueing. | Audit §Inventory & §Billing: *"Can you confirm the response was the success code 200?"* |
 | **Restart Policy** | `restart: on-failure` | Inspects verbatim as `{on-failure 0}` on all 6 containers. | Audit §Check Container restart policy: `docker inspect -f "{{ .HostConfig.RestartPolicy }}"` == `{on-failure 0}`. |
 | **Port Exposure** | Only `3000:3000` published on host | All internal ports (5432, 8080, 5672) use `expose:` and remain unreachable from host network. | Subject §Docker Network & Audit §Check the solution network. |
-| **Startup Gating** | `depends_on` with `condition: service_healthy` everywhere | `service_started` would let the gateway accept requests while `inventory-app` was still connecting to PostgreSQL, producing a `502` on the first cold-boot request. | Subject §Docker Containers: *"Containers must be restarted in case of failure"*; correctness under cold boot. |
+| **Startup Gating** | `depends_on` with `condition: service_healthy` everywhere | `service_started` would let the gateway accept requests while `inventory-app` was still connecting to PostgreSQL, producing a `503` on the first cold-boot request. | Subject §Docker Containers: *"Containers must be restarted in case of failure"*; correctness under cold boot. |
 | **Graceful Shutdown** | `SIGTERM` handlers; `STOPSIGNAL SIGINT` on the database images | `docker stop` exits `0` instead of `137`. PostgreSQL maps `SIGTERM` to a *smart* shutdown that waits for clients, and our pooled connections would hang it until the grace period expired. | Keeps an unacknowledged queue message requeued rather than lost. |
 | **Message Acknowledgement** | `basic_nack(requeue=True)` when an insert fails after retries | Acknowledging a failed insert would silently discard a customer order. | Subject §Docker Containers: billing app *"consuming the messages from the RabbitMQ queue"*. |
 | **Non-root Services** | `USER app` in the three Python images | Least privilege. The database and broker images must start as root to drop privileges with `su-exec`; the serving process is `postgres`/`rabbitmq`. | Security hardening beyond the brief. |
